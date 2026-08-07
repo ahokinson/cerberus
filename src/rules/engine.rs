@@ -284,7 +284,10 @@ mod tests {
             fastrand()
         ));
         fs::create_dir_all(&dir).unwrap();
-        run_git(&dir, &["init", "-q"]);
+        // -b main, not bare `init`: the initial branch name otherwise comes
+        // from the ambient init.defaultBranch, so these fixtures would pass
+        // or fail depending on whose gitconfig is in scope.
+        run_git(&dir, &["init", "-q", "-b", "main"]);
         run_git(&dir, &["config", "user.email", "test@example.com"]);
         run_git(&dir, &["config", "user.name", "Test"]);
         fs::write(dir.join("file.txt"), "one\n").unwrap();
@@ -443,7 +446,10 @@ mod tests {
             fastrand()
         ));
         fs::create_dir_all(&remote).unwrap();
-        run_git(&remote, &["init", "-q", "--bare"]);
+        // Must match the `HEAD:main` push below. A bare repo's HEAD points at
+        // its initial branch, and a clone whose remote HEAD names a ref that
+        // doesn't exist checks out nothing, which fails the commit later.
+        run_git(&remote, &["init", "-q", "--bare", "-b", "main"]);
 
         let local = init_git_repo();
         run_git(

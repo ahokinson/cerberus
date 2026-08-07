@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.1]
+
+### Fixed
+
+- The `git-safety` force-push test fixtures no longer depend on the ambient
+  `init.defaultBranch`. They pushed to a branch named `main` while letting
+  the bare fixture remote take its initial branch from whatever gitconfig
+  was in scope, so the suite passed only where that default was already
+  `main` and failed on a clean checkout, in CI, and under Nix.
+
 ## [0.1.0]
 
 Initial release.
@@ -36,5 +46,6 @@ Initial release.
   `${XDG_STATE_HOME:-$HOME/.local/state}/guard/violations-<session_id>.state`
   for pharos's statusline.
 
-[Unreleased]: https://github.com/ahokinson/cerberus/compare/v0.1.0...HEAD
+[Unreleased]: https://github.com/ahokinson/cerberus/compare/v0.1.1...HEAD
+[0.1.1]: https://github.com/ahokinson/cerberus/compare/v0.1.0...v0.1.1
 [0.1.0]: https://github.com/ahokinson/cerberus/releases/tag/v0.1.0
