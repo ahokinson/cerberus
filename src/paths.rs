@@ -141,6 +141,15 @@ impl Paths {
         self.home.join(".hermes/plugins/cerberus")
     }
 
+    /// opencode's global plugin directory. cerberus writes a single file
+    /// here (`embedded::OPENCODE_PLUGIN`) rather than a config file to
+    /// merge into — opencode plugins are auto-loaded in-process
+    /// TypeScript/JavaScript, not a subprocess/stdin contract. See
+    /// `init::write_opencode_plugin`.
+    pub fn opencode_plugin_dir(&self) -> PathBuf {
+        self.home.join(".config/opencode/plugins")
+    }
+
     /// Which heads `cerberus guard` runs. See `config::enabled_heads`.
     pub fn config_file(&self) -> PathBuf {
         self.config_home.join("cerberus/config.toml")

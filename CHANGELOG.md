@@ -9,6 +9,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **opencode support.** `cerberus init` now writes a single TypeScript
+  plugin (`harness-templates/opencode/cerberus-guard.ts`, embedded as
+  `embedded::OPENCODE_PLUGIN`) into `~/.config/opencode/plugins/` when
+  `opencode` is on `$PATH`. Like Hermes, opencode plugins run in-process
+  rather than as a subprocess given JSON on stdin — here an in-process
+  `tool.execute.before` TypeScript hook that shells out to the real
+  `cerberus guard` binary via Bun's `$` shell (piping stdin through
+  `new Response(payload)`, since Bun's `$` has no dedicated `.stdin()`
+  method). Unlike the other three harnesses, opencode has no per-tool
+  matcher of its own — the hook fires for every tool call — so the plugin
+  carries its own allowlist (`bash`/`edit`/`write`/`webfetch` →
+  `Bash`/`Edit`/`Write`/`WebFetch`) doing the job `GUARD_MATCHER` does
+  elsewhere. opencode's own tool-arg field names are camelCase
+  (`filePath`); the plugin remaps them to the snake_case shape
+  (`file_path`) every existing rule already expects. Verified end-to-end
+  against the real `cerberus` binary via Bun, including a synthetic `edit`
+  on a Claude `settings.json` correctly triggering SANDBOX-003 through the
+  camelCase remapping — though the plugin API details themselves are
+  cerberus's best effort against opencode's docs, not exhaustively
+  confirmed for every built-in tool's argument shape.
 - **Hermes Agent support.** `cerberus init` now writes a small Python
   plugin (`harness-templates/hermes/`, embedded as
   `embedded::HERMES_PLUGIN`) into `~/.hermes/plugins/cerberus/` when

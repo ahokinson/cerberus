@@ -65,3 +65,13 @@ pub const HERMES_PLUGIN: &[(&str, &str)] = &[
         include_str!("../harness-templates/hermes/plugin.py"),
     ),
 ];
+
+/// cerberus's opencode plugin: an in-process TypeScript hook that shells
+/// out to `cerberus guard`, since opencode plugins run inside opencode's
+/// own Bun process rather than as a subprocess given JSON on stdin.
+/// Written by `cerberus init` as a single file into
+/// `Paths::opencode_plugin_dir()` — that directory is flat and shared
+/// across every plugin from every source, unlike Hermes's per-plugin
+/// subdirectory, hence the distinctive filename baked into the path
+/// itself rather than a second embedded const here.
+pub const OPENCODE_PLUGIN: &str = include_str!("../harness-templates/opencode/cerberus-guard.ts");

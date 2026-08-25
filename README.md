@@ -59,6 +59,21 @@ accident of being first. Supported so far:
   against Hermes's documented plugin-discovery conventions, not verified
   against the real `hermes-agent` binary; `cerberus init` says as much and
   points at `hermes doctor` to confirm.
+- **opencode** — `~/.config/opencode/plugins/cerberus-guard.ts`. Like
+  Hermes, opencode plugins run in-process rather than as a subprocess
+  given JSON on stdin — here it's an in-process TypeScript hook
+  (`tool.execute.before`) that shells out to `cerberus guard` via Bun's
+  `$` shell. Unlike the other three, opencode has **no per-tool matcher of
+  its own** — the hook fires for every tool call — so the plugin itself
+  carries an allowlist (`bash`/`edit`/`write`/`webfetch`) doing the job
+  `GUARD_MATCHER` does elsewhere, keeping cerberus off the hot read path.
+  opencode's own tool-arg field names are camelCase (`filePath`); the
+  plugin remaps them to the snake_case shape (`file_path`) every existing
+  rule already expects. Verified end-to-end against the real `cerberus`
+  binary via Bun (a synthetic `edit` on a Claude `settings.json` correctly
+  triggers SANDBOX-003), though the plugin API details themselves are
+  cerberus's best effort against opencode's docs, not exhaustively
+  confirmed for every built-in tool's argument shape.
 
 More harnesses land as `cerberus init` learns to wire them; see
 `CHANGELOG.md` for what's landed.
@@ -147,6 +162,10 @@ re-run:
   so this only ever adds cerberus's entry, never touching anyone else's
 - writes the shipped [`harness-templates/hermes/`](harness-templates/hermes/)
   plugin into `~/.hermes/plugins/cerberus/` if `hermes` is on `$PATH`,
+  always refreshed
+- writes the shipped
+  [`harness-templates/opencode/cerberus-guard.ts`](harness-templates/opencode/)
+  plugin into `~/.config/opencode/plugins/` if `opencode` is on `$PATH`,
   always refreshed
 
 It finishes with a per-head summary of what's ready: tirith on `$PATH` and

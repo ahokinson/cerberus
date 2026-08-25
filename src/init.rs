@@ -62,6 +62,17 @@ fn write_hermes_plugin(dir: &Path) -> io::Result<usize> {
     Ok(embedded::HERMES_PLUGIN.len())
 }
 
+/// Writes cerberus's shipped opencode plugin (`embedded::OPENCODE_PLUGIN`)
+/// as a single file into `dir`, creating it if needed. Always overwritten,
+/// same canonical-content contract as the rule scripts/policies — the
+/// filename is distinctive precisely because, unlike Hermes's reserved
+/// per-plugin subdirectory, opencode's plugin directory is shared with
+/// every other plugin a user has installed.
+fn write_opencode_plugin(dir: &Path) -> io::Result<()> {
+    fs::create_dir_all(dir)?;
+    fs::write(dir.join("cerberus-guard.ts"), embedded::OPENCODE_PLUGIN)
+}
+
 const DEFAULT_CONFIG_TOML: &str = "\
 # All heads run by default. Set `disabled = true` on a head to remove it
 # from `cerberus guard`'s stack. `gate` (the fail-closed backstop) always
@@ -495,6 +506,25 @@ pub fn run(paths: &Paths) -> i32 {
         println!("hermes: not on PATH, skipping plugin install");
     }
 
+    let opencode_on_path = command_exists("opencode");
+    if opencode_on_path {
+        let plugin_dir = paths.opencode_plugin_dir();
+        match write_opencode_plugin(&plugin_dir) {
+            Ok(()) => println!(
+                "opencode plugin: wrote cerberus-guard.ts to {} — best effort against opencode's \
+                documented plugin API (tool.execute.before, no per-tool matcher of its own), not \
+                verified against the real binary",
+                plugin_dir.display()
+            ),
+            Err(e) => problems.push(format!(
+                "couldn't write opencode plugin to {}: {e}",
+                plugin_dir.display()
+            )),
+        }
+    } else {
+        println!("opencode: not on PATH, skipping plugin install");
+    }
+
     println!("\nper-head status:");
     println!(
         "  {:<10} ({:<24}) — tirith on PATH: {}, overlay written: {}",
@@ -693,6 +723,28 @@ mod tests {
             .iter()
             .map(|(name, _)| fs::read_to_string(dir.join(name)).unwrap())
             .collect();
+        assert_eq!(first, second);
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn writes_the_shipped_opencode_plugin() {
+        let dir = tempdir("opencode-writes");
+        write_opencode_plugin(&dir).unwrap();
+        assert_eq!(
+            fs::read_to_string(dir.join("cerberus-guard.ts")).unwrap(),
+            embedded::OPENCODE_PLUGIN
+        );
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn write_opencode_plugin_is_idempotent() {
+        let dir = tempdir("opencode-idempotent");
+        write_opencode_plugin(&dir).unwrap();
+        let first = fs::read_to_string(dir.join("cerberus-guard.ts")).unwrap();
+        write_opencode_plugin(&dir).unwrap();
+        let second = fs::read_to_string(dir.join("cerberus-guard.ts")).unwrap();
         assert_eq!(first, second);
         fs::remove_dir_all(&dir).ok();
     }
