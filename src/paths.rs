@@ -45,6 +45,54 @@ impl Paths {
         self.data_home.join("cupcake-stub")
     }
 
+    /// cupcake's own machine-wide global config root
+    /// (`$XDG_CONFIG_HOME/cupcake`, confirmed against a real cupcake
+    /// install), where `cupcake init --global` scaffolds every harness's
+    /// policies and where they layer on top of the per-project stub above.
+    /// cerberus only ever writes beneath [`Self::cupcake_global_custom_dir`].
+    pub fn cupcake_global_root(&self) -> PathBuf {
+        self.config_home.join("cupcake")
+    }
+
+    /// The one subdirectory cerberus ever writes to inside cupcake's global
+    /// store. Reserved so cerberus's policies can never collide with a
+    /// user's own `custom/<category>/<name>.rego` policies (a real,
+    /// observed layout on a populated global store) — harness-scoped by
+    /// `claude/` already, further scoped to `cerberus/` within it.
+    pub fn cupcake_global_custom_dir(&self) -> PathBuf {
+        self.cupcake_global_root()
+            .join("policies/claude/custom/cerberus")
+    }
+
+    /// A cerberus-owned tirith policy root, analogous in spirit to
+    /// [`Self::cupcake_stub`]: not a real repo, just a fixed location
+    /// `tirith check` can be pointed at via `TIRITH_POLICY_ROOT` when the
+    /// real repo being guarded has no `.tirith/policy.yaml` of its own.
+    pub fn tirith_overlay_root(&self) -> PathBuf {
+        self.data_home.join("cerberus-tirith-overlay")
+    }
+
+    pub fn tirith_overlay_policy_file(&self) -> PathBuf {
+        self.tirith_overlay_root().join(".tirith/policy.yaml")
+    }
+
+    /// A decoy `HOME` for the `cupcake init --global` subprocess only.
+    /// `cupcake init --global` doesn't just scaffold the policy tree — it
+    /// also tries to auto-wire its own independent `PreToolUse` hook
+    /// (matcher `"*"`, running `cupcake eval` directly) into
+    /// `$HOME/.claude/settings.json` on its own initiative, unrelated to
+    /// and uncoordinated with `settings::install_hooks`. That would corrupt
+    /// the single hook slot cerberus owns and double-evaluate cupcake, so
+    /// `init::ensure_cupcake_global` runs the subprocess with `HOME`
+    /// pointed here instead of the user's real home: the global config
+    /// destination is controlled separately via `XDG_CONFIG_HOME`
+    /// (`cupcake_global_root`'s parent), so the store still lands in the
+    /// right place, but cupcake's settings.json probe finds nothing at this
+    /// decoy path and leaves the real `~/.claude/settings.json` alone.
+    pub fn cupcake_global_init_decoy_home(&self) -> PathBuf {
+        self.data_home.join("cupcake-global-init-home")
+    }
+
     /// Where Rhai rule scripts (`*.rhai`) are loaded from at runtime,
     /// deliberately outside the compiled binary, so adding or editing a
     /// rule doesn't need a rebuild. See `rules::engine`.

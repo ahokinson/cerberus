@@ -1,6 +1,6 @@
 // Head: judgement — Purpose: governance policy
 //
-// Blocks the two ways an agent could weaken its own Bash sandbox:
+// Blocks the three ways an agent could weaken its own sandbox:
 //
 // - SANDBOX-001: setting the Bash tool's own `dangerouslyDisableSandbox`
 //   escape hatch. The tool's own instructions actively encourage flipping
@@ -14,20 +14,53 @@
 //   write-shaped command touching a Claude settings path that also
 //   mentions "sandbox" gets blocked, even if it would, on inspection,
 //   have been benign.
+// - SANDBOX-003: the same edit made with a file-writing tool instead of a
+//   shell command. SANDBOX-002 was trivially defeated by reaching for Edit
+//   rather than `sed`, which is what put every mutating tool behind
+//   `cerberus guard` in the first place.
+//
+//   Unlike SANDBOX-002 this does *not* require the payload to mention
+//   "sandbox". A Write replaces the whole file, so the dangerous edit is
+//   precisely the one that deletes the sandbox block and therefore never
+//   contains the word. The cost is that the agent can't edit a Claude
+//   settings.json at all; that file holds the sandbox, permission, and hook
+//   configuration that cerberus itself depends on, so a human should be
+//   making those changes anyway.
 //
 // This is also the SessionStart health check's canary for the rule-script
-// layer: a synthetic `dangerouslyDisableSandbox: true` event must be
-// denied by this rule at every SessionStart, or the guard is considered
-// degraded and the fail-closed backstop denies all Bash. Do not remove or
-// weaken SANDBOX-001 without updating that canary.
+// layer: synthetic `dangerouslyDisableSandbox: true` (SANDBOX-001) and
+// settings.json Write (SANDBOX-003) events must both be denied by this rule
+// at every SessionStart, or the guard is considered degraded and the
+// fail-closed backstop denies every tool cerberus guards. Do not remove or
+// weaken either without updating `src/health.rs`'s canaries.
+
+// Claude's settings files, the ones holding sandbox/permission/hook config.
+// Matched as a suffix so both the user-level (`~/.claude/`) and the
+// project-level (`<repo>/.claude/`) copies are covered.
+fn is_claude_settings(path) {
+    path.contains(".claude/settings.json") || path.contains(".claude/settings.local.json")
+}
+
+// Tools that replace or mutate file contents. Read and Grep name a path too
+// (see `tool_paths`), and reading settings.json is fine.
+fn is_writing_tool(name) {
+    name == "Write" || name == "Edit" || name == "NotebookEdit"
+}
 
 fn check(cmd, cwd, input) {
     if input.tool_input.dangerouslyDisableSandbox == true {
         return "Blocked (SANDBOX-001): the agent may not disable its own Bash sandbox (`dangerouslyDisableSandbox`). If a command genuinely needs to run unsandboxed, that decision belongs to a human, not the agent.";
     }
 
-    let touches_settings = cmd.contains(".claude/settings.json") || cmd.contains(".claude/settings.local.json");
-    if !touches_settings {
+    if is_writing_tool(input.tool_name) {
+        for path in tool_paths(input) {
+            if is_claude_settings(path) {
+                return "Blocked (SANDBOX-003): the agent may not write to a Claude `settings.json`. That file holds the sandbox, permission, and hook configuration the guard itself depends on, so changing it is a human's call. Ask for the edit you want made.";
+            }
+        }
+    }
+
+    if !is_claude_settings(cmd) {
         return;
     }
 

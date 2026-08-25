@@ -1,7 +1,7 @@
 use crate::config;
 use crate::head::Head;
 use crate::hook::{is_deny, sessionstart_context};
-use crate::integrations::cupcake;
+use crate::integrations::{cupcake, tirith};
 use crate::paths::Paths;
 use crate::process::command_exists;
 use crate::rules::engine;
@@ -27,20 +27,70 @@ fn canary_blocked(paths: &Paths) -> bool {
     cupcake::evaluate(&paths.cupcake_stub(), &event).is_some_and(|out| is_deny(&out))
 }
 
-/// True if the shipped `sandbox-integrity.rhai` rule (or an equivalent
-/// rule) actually denies a synthetic `dangerouslyDisableSandbox: true`
-/// event. This is the rule-script head's canary, matching `canary_blocked`'s
-/// role for cupcake: rule scripts live on disk rather than being compiled
-/// into the binary (see `Paths::rule_scripts_dir`), so a rule an agent
-/// edited or deleted out from under the guard has to be caught here, at
-/// `SessionStart`, instead of silently degrading enforcement. [`crate::gate`]
-/// turns a failed canary into "block all Bash until repaired."
-fn rule_scripts_canary_blocked(rules_dir: &std::path::Path) -> bool {
+/// Canary for the policy head's **global-store** content specifically, as
+/// opposed to [`canary_blocked`], which only proves cupcake itself is wired
+/// up and enforcing (cupcake's stock builtins already block `rm -rf /` on
+/// their own, so reusing that event here would pass even with cerberus's
+/// own policies fully stripped out). Uses a synthetic `Write` to cerberus's
+/// own rule-scripts path, which only `guard-self-protection.rego`
+/// (CERB-POL-004) has any reason to deny — nothing in cupcake's stock
+/// builtins knows about cerberus's paths, so a pass here is attributable
+/// specifically to cerberus's own shipped content.
+fn global_policy_canary_blocked(paths: &Paths) -> bool {
     let event = json!({
         "session_id": "guard-health",
+        "transcript_path": "/dev/null",
+        "cwd": paths.home.to_string_lossy(),
+        "permission_mode": "bypassPermissions",
+        "hook_event_name": "PreToolUse",
+        "tool_name": "Write",
+        "tool_input": {
+            "file_path": paths.rule_scripts_dir().join("sandbox-integrity.rhai").to_string_lossy(),
+        },
+    })
+    .to_string();
+    cupcake::evaluate(&paths.cupcake_stub(), &event).is_some_and(|out| is_deny(&out))
+}
+
+/// Canary for the risk head's shipped overlay content
+/// (`policies/tirith/policy.yaml`). Unlike `judgement`'s and `policy`'s
+/// canaries, `risk` had no content of its own to verify before this — only
+/// `command_exists("tirith")` was checked. Uses [`tirith::overlay_blocks`]
+/// to force cerberus's overlay regardless of `health`'s own `cwd`, proving
+/// the overlay is present, valid, and live rather than just that tirith
+/// itself is installed.
+fn tirith_overlay_canary_blocked(paths: &Paths) -> bool {
+    tirith::overlay_blocks(paths, "rm -rf /home/guard-health/.config/cerberus")
+}
+
+/// True if the shipped `sandbox-integrity.rhai` rule (or an equivalent rule)
+/// actually denies both ways an agent could weaken its own sandbox. These
+/// are the rule-script head's canaries, matching `canary_blocked`'s role for
+/// cupcake: rule scripts live on disk rather than being compiled into the
+/// binary (see `Paths::rule_scripts_dir`), so a rule an agent edited or
+/// deleted out from under the guard has to be caught here, at `SessionStart`,
+/// instead of silently degrading enforcement. [`crate::gate`] turns a failed
+/// canary into "block every guarded tool until repaired."
+///
+/// There are two because there are two shapes of the same attack, and
+/// covering one proves nothing about the other. SANDBOX-001 is the Bash
+/// tool's `dangerouslyDisableSandbox` flag; SANDBOX-003 is a file-writing
+/// tool pointed at a Claude `settings.json`, which is the whole reason
+/// `guard` runs on more than Bash.
+fn rule_scripts_canary_blocked(rules_dir: &std::path::Path) -> bool {
+    let disable_flag = json!({
+        "session_id": "guard-health",
+        "tool_name": "Bash",
         "tool_input": { "command": "ls", "dangerouslyDisableSandbox": true },
     });
-    engine::evaluate(rules_dir, "ls", std::path::Path::new("/"), &event).is_some()
+    let settings_write = json!({
+        "session_id": "guard-health",
+        "tool_name": "Write",
+        "tool_input": { "file_path": "/home/guard-health/.claude/settings.json" },
+    });
+    let root = std::path::Path::new("/");
+    engine::evaluate(rules_dir, "ls", root, &disable_flag).is_some()
+        && engine::evaluate(rules_dir, "", root, &settings_write).is_some()
 }
 
 /// The shared prefix every problem message for `head` opens with, e.g.
@@ -70,8 +120,9 @@ fn rule_scripts_problem(rules_dir: &std::path::Path) -> Option<String> {
     }
     if !rule_scripts_canary_blocked(rules_dir) {
         return Some(format!(
-            "{} rule scripts did not block a known-dangerous command \
-            (dangerouslyDisableSandbox), guard not enforcing",
+            "{} rule scripts did not block a known-dangerous call \
+            (dangerouslyDisableSandbox, or a write to a Claude settings.json), \
+            guard not enforcing",
             label(Head::Judgement)
         ));
     }
@@ -85,8 +136,22 @@ fn collect_problems(paths: &Paths) -> Vec<String> {
     let mut problems = Vec::new();
     let enabled = config::enabled_heads(paths);
 
-    if enabled.contains(&Head::Risk) && !command_exists("tirith") {
-        problems.push(format!("{}: tirith not on PATH", label(Head::Risk)));
+    if enabled.contains(&Head::Risk) {
+        if !command_exists("tirith") {
+            problems.push(format!("{}: tirith not on PATH", label(Head::Risk)));
+        } else if !paths.tirith_overlay_policy_file().is_file() {
+            problems.push(format!(
+                "{}: tirith overlay policy missing ({}), run `cerberus init`",
+                label(Head::Risk),
+                paths.tirith_overlay_policy_file().display()
+            ));
+        } else if !tirith_overlay_canary_blocked(paths) {
+            problems.push(format!(
+                "{}: tirith overlay did not block a known-dangerous command \
+                (cerberus-guard-self-tamper), guard not enforcing",
+                label(Head::Risk)
+            ));
+        }
     }
 
     if enabled.contains(&Head::Policy) {
@@ -110,6 +175,18 @@ fn collect_problems(paths: &Paths) -> Vec<String> {
                 problems.push(format!(
                     "{}: cupcake did not block a known-dangerous command (rm -rf /), guard \
                     not enforcing",
+                    label(Head::Policy)
+                ));
+            } else if !cupcake::global_installed(&paths.cupcake_global_root()) {
+                problems.push(format!(
+                    "{}: cupcake global store missing ({}), run `cerberus init`",
+                    label(Head::Policy),
+                    paths.cupcake_global_root().display()
+                ));
+            } else if !global_policy_canary_blocked(paths) {
+                problems.push(format!(
+                    "{}: cerberus's own cupcake policies did not block a known-dangerous \
+                    write (guard-self-protection), guard not enforcing",
                     label(Head::Policy)
                 ));
             }
@@ -157,8 +234,9 @@ fn report(
     let _ = fs::write(sentinel, &joined);
     let _ = writeln!(err, "agent guard health check failed: {joined}");
     let message = format!(
-        "Security guard degraded: {joined}. bypassPermissions is active and Bash is now gated \
-        fail-closed until the guard is repaired. Repair with `cerberus init`, then restart."
+        "Security guard degraded: {joined}. bypassPermissions is active and every guarded tool \
+        (Bash, Write, Edit, NotebookEdit, WebFetch, MCP) is now gated fail-closed until the \
+        guard is repaired. Repair with `cerberus init`, then restart."
     );
     let _ = writeln!(out, "{}", sessionstart_context(&message));
 }
@@ -249,6 +327,31 @@ mod tests {
             problem
                 .as_deref()
                 .is_some_and(|p| p.contains("dangerouslyDisableSandbox")),
+            "expected a failing-canary problem, got {problem:?}"
+        );
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn rule_scripts_problem_reports_a_rule_that_only_covers_the_bash_bypass() {
+        // The realistic degradation now that guard runs on more than Bash:
+        // SANDBOX-001 survives but the tool-shaped SANDBOX-003 has been
+        // stripped out, leaving the Edit-tool bypass wide open. One canary
+        // passing must not be enough.
+        let dir = rule_scripts_tempdir("half-canary");
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(
+            dir.join("partial.rhai"),
+            r#"fn check(cmd, cwd, input) {
+                if input.tool_input.dangerouslyDisableSandbox == true { return "Blocked"; }
+            }"#,
+        )
+        .unwrap();
+        let problem = rule_scripts_problem(&dir);
+        assert!(
+            problem
+                .as_deref()
+                .is_some_and(|p| p.contains("settings.json")),
             "expected a failing-canary problem, got {problem:?}"
         );
         fs::remove_dir_all(&dir).ok();

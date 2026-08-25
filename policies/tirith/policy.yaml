@@ -1,0 +1,63 @@
+# Head: risk — Purpose: general risk avoidance
+#
+# cerberus's own overlay on top of tirith's built-in detections, applied
+# only in repos that don't already have their own .tirith/policy.yaml (see
+# src/integrations/tirith.rs::has_repo_policy — a repo's own policy always
+# wins; cerberus never overrides it. Confirmed: TIRITH_POLICY_ROOT otherwise
+# takes precedence over an ambient repo policy, so this Rust-side guard is
+# load-bearing, not decorative).
+#
+# schema_version / fail_mode / paranoia are pinned explicitly rather than
+# left to tirith's own defaults, so a future tirith version changing its
+# defaults can't silently change cerberus's posture out from under it.
+#
+# Custom-rule field names and the severity->effective-action mapping were
+# confirmed against the real `tirith rule validate`/`tirith rule
+# explain`/`tirith rule test` tooling, not guessed from --help alone: there
+# is no `message:` field (declaring both `title:` and `message:` is a
+# "duplicate field" error — `description:` is the real second field), and
+# `action: block` only takes effect at HIGH/CRITICAL severity — MEDIUM
+# always derives to an effective `warn` regardless of the declared action.
+#
+# Only one custom rule ships, not several, for a reason discovered the hard
+# way: `tirith rule test` evaluates a named rule directly and always
+# reports whether it fires, but that is NOT what `cerberus guard` actually
+# calls — `risk` shells out to `tirith check`, which only evaluates
+# custom_rules once tirith's OWN built-in tier-1 detections have already
+# escalated analysis past tier 1. A command matching only a cerberus
+# pattern with no overlap in tirith's ~150 built-in categories (e.g. a bare
+# `claude --dangerously-skip-permissions`, or `git commit --no-verify`)
+# never reaches tier 2/3 and so never gets checked against custom_rules at
+# all in production, even though `tirith rule test` reports it "fires" —
+# confirmed by direct comparison against real `tirith check` output.
+# cerberus-guard-self-tamper survived because `rm -rf`/`*-uninstall`
+# commands already trip one of tirith's own built-in categories, escalating
+# analysis regardless of severity/paranoia filtering. Before adding another
+# rule here, verify it fires via `tirith check --format json -- '<cmd>'`
+# directly (with `TIRITH_POLICY_ROOT` pointed at this file) — `tirith rule
+# test`/`tirith rule validate` alone are not sufficient proof it will ever
+# enforce anything. See CONTRIBUTING.md's "Adding a risk rule".
+#
+# The path match is keyed on cerberus's distinctive directory names alone
+# (`cerberus`, `cupcake-stub`, `cerberus-tirith-overlay`, `tirith`), not an
+# assumed `~/.config/...`/`~/.local/share/...` prefix: `Paths` derives every
+# one of these roots from `XDG_CONFIG_HOME`/`XDG_DATA_HOME`, which can point
+# anywhere — a prefix-based match silently missed a real `rm -rf` of
+# cerberus's own state under a non-dotted XDG root in testing.
+
+schema_version: 1
+fail_mode: open           # cerberus's heads are fail-open per head; `gate` is the fail-closed backstop, not tirith
+paranoia: 2                # medium+ findings surfaced; an unattended agent runs far more commands than a human ever pastes in
+allow_bypass_env_noninteractive: false
+
+custom_rules:
+  - id: cerberus-guard-self-tamper
+    context: [exec]
+    pattern: '(rm\s+-rf?\s+[^\n]*/(cerberus|cupcake-stub|cerberus-tirith-overlay|tirith)(/[^\s]*)?(\s|$)|\b(brew\s+uninstall|apt(-get)?\s+remove|cargo\s+uninstall|pip\s+uninstall)\s+(tirith|cupcake|cerberus)\b)'
+    severity: CRITICAL
+    action: block
+    title: Removing or uninstalling the guard's own tooling/config
+    description: >-
+      This looks like it would remove or uninstall cerberus, tirith, or
+      cupcake's own configuration or binary. Disabling the guard is a
+      human's call.

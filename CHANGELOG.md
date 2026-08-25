@@ -7,6 +7,70 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- `guard` now runs on every mutating tool, not just Bash:
+  `Bash|Write|Edit|NotebookEdit|WebFetch|mcp__.*`. The read-only tools
+  (`Read`, `Grep`, `Glob`) are deliberately left out, which keeps the hook
+  off the hottest tools in a session.
+- `sandbox-integrity` gains **SANDBOX-003**, denying a file-writing tool
+  pointed at a Claude `settings.json`. SANDBOX-002 only ever covered the
+  shell-command form, so the same edit went through unchallenged via the
+  Edit tool. `health` now runs a second rule-script canary for it.
+- Two native functions for rule scripts, `tool_paths(input)` and
+  `tool_url(input)`, normalizing the per-tool `tool_input` shapes so one
+  rule can cover Write, Edit, and NotebookEdit at once.
+- cerberus now ships real default content for `policy` and `risk`, not just
+  `judgement`. Four Rego policies (`policies/cupcake/`: CERB-POL-001
+  sandbox-integrity, CERB-POL-002 webfetch-ssrf, CERB-POL-003
+  ci-trust-boundary, CERB-POL-004 guard-self-protection) are installed by
+  `cerberus init` into a reserved `custom/cerberus/` subdirectory of
+  cupcake's global store, which `init` now also bootstraps
+  (`cupcake init --global --harness claude`) if it doesn't already exist. A
+  tirith `custom_rules:` overlay (`policies/tirith/policy.yaml`:
+  `cerberus-guard-self-tamper`) is written to a cerberus-owned policy root
+  and applied via `TIRITH_POLICY_ROOT`, but only in repos with no
+  `.tirith/policy.yaml` of their own — a repo or team's real policy always
+  wins. Previously `policy` shipped with zero enforcing content out of the
+  box, and `risk` had no cerberus-owned content at all. Only one tirith rule
+  ships, not several: `tirith check` (what `risk` actually calls) only
+  evaluates `custom_rules` once tirith's own built-in tier-1 detections
+  have already escalated past tier 1, so a rule with no overlap in tirith's
+  own built-in categories never fires in production even when
+  `tirith rule test` reports it firing — a rule-authoring tool, not
+  equivalent to the real enforcement path. Two draft rules were dropped for
+  exactly this reason; see `policies/tirith/policy.yaml` and
+  CONTRIBUTING.md's "Adding a risk rule".
+- `cerberus init`'s bootstrap of cupcake's global store runs the
+  `cupcake init --global` subprocess with a decoy `HOME`: confirmed against
+  the real binary, `cupcake init --global` also tries to auto-wire its own
+  independent `PreToolUse` hook into `$HOME/.claude/settings.json`, which
+  would otherwise corrupt the single hook slot `cerberus init` owns and
+  double-evaluate cupcake on every guarded call.
+- `health` gains two new canaries: a synthetic `Write` to cerberus's own
+  rule-scripts path, denied only by the policy head's new
+  `guard-self-protection.rego` (proving cerberus's own policy content is
+  live, not just that cupcake itself works); and a synthetic
+  `rm -rf .../.config/cerberus`, denied only by the risk head's new
+  `cerberus-guard-self-tamper` tirith rule.
+
+### Changed
+
+- **`cerberus init` no longer claims a hook slot in `settings.json`.** It
+  previously located its entry by matcher string and replaced that entry's
+  hooks wholesale, which would have silently deleted an unrelated hook the
+  moment the matcher widened. It now only ever adds, removes, or moves
+  hooks running a cerberus command, and prepends its own entry so the guard
+  runs first. Existing installs migrate in place; no orphaned `Bash` entry
+  is left behind.
+- `cerberus health` is hoisted out of whatever `SessionStart` entry it was
+  appended into and given its own entry at the front. Other commands in
+  that entry are left alone.
+- The `risk` head is now gated on `tool_name == "Bash"` rather than on the
+  presence of a `tool_input.command`, so an MCP tool carrying its own
+  non-shell `command` field is never fed to tirith's pattern scanner.
+- `gate` and `health` messages no longer say "Bash".
+
 ## [0.1.1]
 
 ### Fixed

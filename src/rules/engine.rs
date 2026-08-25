@@ -1,4 +1,4 @@
-use super::{environment, git, shell};
+use super::{environment, git, shell, tool};
 use crate::process::command_exists;
 use rhai::{AST, Array, Dynamic, Engine, Map, Scope};
 use serde_json::Value;
@@ -13,6 +13,15 @@ fn strings_from_array(arr: Array) -> Vec<String> {
 
 fn array_from_strings(items: Vec<String>) -> Array {
     items.into_iter().map(Dynamic::from).collect()
+}
+
+/// Converts a script-side value back to `serde_json`, so the `tool_*`
+/// natives can reuse `rules::tool` rather than reimplementing its key
+/// lookups against Rhai's map type. Failure yields `Value::Null`, which
+/// those helpers already read as "names nothing" — fail-open per rule, like
+/// everything else here.
+fn dynamic_to_json(value: &Dynamic) -> Value {
+    rhai::serde::from_dynamic(value).unwrap_or(Value::Null)
 }
 
 /// Builds the Rhai engine rule scripts run under: registers every
@@ -32,6 +41,20 @@ pub fn build_engine() -> Engine {
 
     engine.register_fn("command_exists", |name: &str| -> bool {
         command_exists(name)
+    });
+
+    // `guard` runs on every mutating tool, not just Bash, and each tool
+    // names the thing it acts on under a different `tool_input` key. These
+    // two hand a script the paths and URL already normalized, so a rule
+    // about a sensitive path doesn't need a branch per tool. They take the
+    // whole `input` map (rather than a pre-extracted value) so a script
+    // calls them the same way it reads any other payload field.
+    engine.register_fn("tool_paths", |input: Dynamic| -> Array {
+        array_from_strings(tool::paths(&dynamic_to_json(&input)))
+    });
+
+    engine.register_fn("tool_url", |input: Dynamic| -> String {
+        tool::url(&dynamic_to_json(&input)).unwrap_or_default()
     });
 
     engine.register_fn("git_is_inside_work_tree", |cwd: &str| -> bool {
@@ -261,6 +284,89 @@ mod tests {
             evaluate(&shipped_rules_dir(), cmd, Path::new("/tmp"), &input),
             None
         );
+    }
+
+    // ─── SANDBOX-003: the tool-shaped version of the same bypass. Before
+    // guard ran on anything but Bash, reaching for Edit instead of `sed`
+    // walked straight past SANDBOX-002.
+
+    fn write_event(path: &str) -> Value {
+        serde_json::json!({ "tool_name": "Write", "tool_input": { "file_path": path } })
+    }
+
+    #[test]
+    fn sandbox_integrity_denies_writing_to_claude_settings_json() {
+        for tool in ["Write", "Edit", "NotebookEdit"] {
+            let input = serde_json::json!({
+                "tool_name": tool,
+                "tool_input": { "file_path": "/home/someone/.claude/settings.json" }
+            });
+            let reason = evaluate(&shipped_rules_dir(), "", Path::new("/tmp"), &input);
+            assert!(
+                reason.as_deref().is_some_and(|r| r.contains("SANDBOX-003")),
+                "expected a SANDBOX-003 deny for {tool}, got {reason:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn sandbox_integrity_denies_writing_to_a_project_settings_local_json() {
+        let input = write_event("/repo/.claude/settings.local.json");
+        let reason = evaluate(&shipped_rules_dir(), "", Path::new("/tmp"), &input);
+        assert!(
+            reason.as_deref().is_some_and(|r| r.contains("SANDBOX-003")),
+            "expected a SANDBOX-003 deny, got {reason:?}"
+        );
+    }
+
+    #[test]
+    fn sandbox_integrity_survives_an_event_with_no_tool_name() {
+        // SANDBOX-003 reads `input.tool_name`, which is `()` when absent. If
+        // comparing that against a string threw, the whole script would error
+        // and fail open — silently taking SANDBOX-001 and -002 down with it.
+        // Reaching a SANDBOX-002 deny proves execution got past that line.
+        let input = serde_json::json!({ "tool_input": { "command": "irrelevant" } });
+        let cmd = "sed -i 's/enabled/disabled/' ~/.claude/settings.json # sandbox";
+        let reason = evaluate(&shipped_rules_dir(), cmd, Path::new("/tmp"), &input);
+        assert!(
+            reason.as_deref().is_some_and(|r| r.contains("SANDBOX-002")),
+            "expected a SANDBOX-002 deny, got {reason:?}"
+        );
+    }
+
+    #[test]
+    fn sandbox_integrity_allows_writing_to_an_unrelated_path() {
+        let input = write_event("/repo/src/main.rs");
+        assert_eq!(
+            evaluate(&shipped_rules_dir(), "", Path::new("/tmp"), &input),
+            None
+        );
+    }
+
+    #[test]
+    fn sandbox_integrity_allows_reading_settings_json_with_the_read_tool() {
+        // Read names a `file_path` too, and reading the file is fine. Only
+        // the writing tools are denied.
+        let input = serde_json::json!({
+            "tool_name": "Read",
+            "tool_input": { "file_path": "/home/someone/.claude/settings.json" }
+        });
+        assert_eq!(
+            evaluate(&shipped_rules_dir(), "", Path::new("/tmp"), &input),
+            None
+        );
+    }
+
+    #[test]
+    fn the_other_shipped_rules_stay_silent_on_a_non_bash_tool() {
+        // Non-Bash calls reach the scripts with `cmd == ""`. The three
+        // command-oriented rules must go inert rather than misfire on it, so
+        // that widening guard beyond Bash didn't quietly change their
+        // behavior. Uses a repo path so git-safety's cwd checks are live.
+        let dir = init_git_repo();
+        let input = write_event(&dir.join("file.txt").to_string_lossy());
+        assert_eq!(evaluate(&shipped_rules_dir(), "", &dir, &input), None);
+        fs::remove_dir_all(&dir).ok();
     }
 
     #[test]
@@ -710,6 +816,36 @@ mod tests {
         assert_eq!(evaluate(&dir, "ls", Path::new("/tmp"), &input), None);
         let bare_input = serde_json::json!({});
         assert_eq!(evaluate(&dir, "ls", Path::new("/tmp"), &bare_input), None);
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn tool_paths_and_tool_url_are_available_to_scripts() {
+        let dir = tempdir("tool-natives");
+        write_rule(
+            &dir,
+            "tool.rhai",
+            r#"
+            fn check(cmd, cwd, input) {
+                let paths = tool_paths(input);
+                if paths.len() == 1 && paths[0] == "/x/y" && tool_url(input) == "" {
+                    "Blocked (TEST-TOOL)"
+                }
+            }
+            "#,
+        );
+        let input = serde_json::json!({
+            "tool_name": "Write", "tool_input": { "file_path": "/x/y" }
+        });
+        assert_eq!(
+            evaluate(&dir, "", Path::new("/tmp"), &input),
+            Some("Blocked (TEST-TOOL)".to_string())
+        );
+
+        let fetch = serde_json::json!({
+            "tool_name": "WebFetch", "tool_input": { "url": "https://example.com" }
+        });
+        assert_eq!(evaluate(&dir, "", Path::new("/tmp"), &fetch), None);
         fs::remove_dir_all(&dir).ok();
     }
 
