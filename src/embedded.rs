@@ -47,3 +47,21 @@ pub const CUPCAKE_POLICIES: &[(&str, &str)] = &[
 /// `Paths::tirith_overlay_policy_file()` and applied only in repos with no
 /// `.tirith/policy.yaml` of their own (see `integrations::tirith`).
 pub const TIRITH_POLICY: &str = include_str!("../policies/tirith/policy.yaml");
+
+/// cerberus's Hermes Agent plugin: a Python `pre_tool_call` hook that
+/// shells out to `cerberus guard`, since Hermes's best-documented
+/// integration surface is an in-process Python callback rather than a
+/// subprocess/stdin contract the way Claude Code, Codex CLI, and Cursor
+/// all are. Written by `cerberus init` into `Paths::hermes_plugin_dir()`.
+/// See `harness-templates/hermes/plugin.py` for why `cerberus guard`
+/// itself needs no Hermes-specific code at all.
+pub const HERMES_PLUGIN: &[(&str, &str)] = &[
+    (
+        "plugin.yaml",
+        include_str!("../harness-templates/hermes/plugin.yaml"),
+    ),
+    (
+        "plugin.py",
+        include_str!("../harness-templates/hermes/plugin.py"),
+    ),
+];

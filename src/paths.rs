@@ -133,6 +133,14 @@ impl Paths {
         self.home.join(".cursor/hooks.json")
     }
 
+    /// Hermes Agent's plugin directory reserved for cerberus's own plugin
+    /// (`embedded::HERMES_PLUGIN`) — a Python `pre_tool_call` hook that
+    /// shells out to `cerberus guard`, rather than a config file cerberus
+    /// merges into. See `init::write_hermes_plugin`.
+    pub fn hermes_plugin_dir(&self) -> PathBuf {
+        self.home.join(".hermes/plugins/cerberus")
+    }
+
     /// Which heads `cerberus guard` runs. See `config::enabled_heads`.
     pub fn config_file(&self) -> PathBuf {
         self.config_home.join("cerberus/config.toml")

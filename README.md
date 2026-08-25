@@ -42,6 +42,23 @@ accident of being first. Supported so far:
   can only guard Cursor's Bash and MCP tool calls, never
   Write/Edit/NotebookEdit — a permanent limit of Cursor's current hook
   surface, not a gap in cerberus.
+- **Hermes Agent** — `~/.hermes/plugins/cerberus/`. Hermes's
+  best-documented integration surface is an in-process Python
+  `pre_tool_call` callback, not a subprocess/stdin contract like the other
+  three, so `cerberus init` writes a small Python plugin
+  ([`harness-templates/hermes/`](harness-templates/hermes/)) that shells
+  out to the real `cerberus guard` binary and translates both directions.
+  Hermes's registry has around 86 tools with no per-tool matcher of its
+  own, so the plugin carries an allowlist mapping the handful cerberus
+  guards (`terminal`, `write_file`, `patch`) to their canonical
+  `Bash`/`Write`/`Edit` names — confirmed from Hermes's own tools
+  reference, deliberately not including tools like `process` whose
+  argument shape isn't confirmed to be a real shell command.
+  `cerberus guard`/`cerberus health` need no Hermes-specific code at all —
+  the whole adapter lives in that plugin. Its manifest is a best effort
+  against Hermes's documented plugin-discovery conventions, not verified
+  against the real `hermes-agent` binary; `cerberus init` says as much and
+  points at `hermes doctor` to confirm.
 
 More harnesses land as `cerberus init` learns to wire them; see
 `CHANGELOG.md` for what's landed.
@@ -128,6 +145,9 @@ re-run:
   `beforeShellExecution` and `beforeMCPExecution` events if a `~/.cursor`
   directory exists — Cursor's own hooks are additive across scope layers,
   so this only ever adds cerberus's entry, never touching anyone else's
+- writes the shipped [`harness-templates/hermes/`](harness-templates/hermes/)
+  plugin into `~/.hermes/plugins/cerberus/` if `hermes` is on `$PATH`,
+  always refreshed
 
 It finishes with a per-head summary of what's ready: tirith on `$PATH` and
 whether the overlay was written, the cupcake stub/global store and `opa`

@@ -50,6 +50,18 @@ fn write_tirith_overlay(paths: &Paths) -> io::Result<()> {
     fs::write(&file, embedded::TIRITH_POLICY)
 }
 
+/// Writes cerberus's shipped Hermes Agent plugin (`embedded::HERMES_PLUGIN`)
+/// into `dir`, creating it if needed. Same always-overwrite-the-known-files
+/// contract as [`write_rule_scripts`]/[`write_cupcake_policies`]: this
+/// directory is reserved to cerberus alone.
+fn write_hermes_plugin(dir: &Path) -> io::Result<usize> {
+    fs::create_dir_all(dir)?;
+    for (name, contents) in embedded::HERMES_PLUGIN {
+        fs::write(dir.join(name), contents)?;
+    }
+    Ok(embedded::HERMES_PLUGIN.len())
+}
+
 const DEFAULT_CONFIG_TOML: &str = "\
 # All heads run by default. Set `disabled = true` on a head to remove it
 # from `cerberus guard`'s stack. `gate` (the fail-closed backstop) always
@@ -464,6 +476,25 @@ pub fn run(paths: &Paths) -> i32 {
         println!("cursor: no ~/.cursor directory found, skipping hooks.json wiring");
     }
 
+    let hermes_on_path = command_exists("hermes");
+    if hermes_on_path {
+        let plugin_dir = paths.hermes_plugin_dir();
+        match write_hermes_plugin(&plugin_dir) {
+            Ok(n) => println!(
+                "hermes plugin: wrote {n} file(s) to {} — verify with `hermes hooks list` or \
+                `hermes doctor`; this plugin's manifest is a best effort against Hermes's \
+                documented format, not verified against the real binary",
+                plugin_dir.display()
+            ),
+            Err(e) => problems.push(format!(
+                "couldn't write hermes plugin to {}: {e}",
+                plugin_dir.display()
+            )),
+        }
+    } else {
+        println!("hermes: not on PATH, skipping plugin install");
+    }
+
     println!("\nper-head status:");
     println!(
         "  {:<10} ({:<24}) — tirith on PATH: {}, overlay written: {}",
@@ -635,6 +666,34 @@ mod tests {
         assert!(matches!(outcome, CodexFeatureOutcome::ExplicitlyDisabled));
         let unchanged = fs::read_to_string(&config_path).unwrap();
         assert_eq!(unchanged, "[features]\ncodex_hooks = false\n");
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn writes_all_shipped_hermes_plugin_files() {
+        let dir = tempdir("hermes-writes-all");
+        let count = write_hermes_plugin(&dir).unwrap();
+        assert_eq!(count, embedded::HERMES_PLUGIN.len());
+        for (name, contents) in embedded::HERMES_PLUGIN {
+            assert_eq!(fs::read_to_string(dir.join(name)).unwrap(), *contents);
+        }
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn write_hermes_plugin_is_idempotent() {
+        let dir = tempdir("hermes-idempotent");
+        write_hermes_plugin(&dir).unwrap();
+        let first: Vec<_> = embedded::HERMES_PLUGIN
+            .iter()
+            .map(|(name, _)| fs::read_to_string(dir.join(name)).unwrap())
+            .collect();
+        write_hermes_plugin(&dir).unwrap();
+        let second: Vec<_> = embedded::HERMES_PLUGIN
+            .iter()
+            .map(|(name, _)| fs::read_to_string(dir.join(name)).unwrap())
+            .collect();
+        assert_eq!(first, second);
         fs::remove_dir_all(&dir).ok();
     }
 

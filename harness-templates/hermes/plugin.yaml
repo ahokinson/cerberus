@@ -1,0 +1,13 @@
+# cerberus's Hermes Agent plugin manifest.
+#
+# Best effort against Hermes's documented plugin-discovery conventions
+# (plugins under ~/.hermes/plugins/<name>/, auto-discovered via their own
+# plugin.yaml) — not verified against the real hermes-agent binary. If
+# Hermes's actual manifest schema differs, run `hermes hooks list` /
+# `hermes doctor` to see what it expects and adjust this file.
+name: cerberus
+version: "0.1.0"
+description: >
+  Routes every tool call through cerberus's guard (risk/policy/judgement
+  heads) before Hermes executes it, by shelling out to the real
+  `cerberus guard` binary from a pre_tool_call hook. See plugin.py.

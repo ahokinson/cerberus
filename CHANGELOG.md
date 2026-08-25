@@ -9,6 +9,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Hermes Agent support.** `cerberus init` now writes a small Python
+  plugin (`harness-templates/hermes/`, embedded as
+  `embedded::HERMES_PLUGIN`) into `~/.hermes/plugins/cerberus/` when
+  `hermes` is on `$PATH`. Hermes's best-documented integration surface is
+  an in-process Python `pre_tool_call` callback, not a subprocess/stdin
+  contract like Claude Code, Codex CLI, and Cursor — Hermes does have a
+  config.yaml-driven shell-hook path too, but its exact stdin/stdout
+  contract isn't documented anywhere, so cerberus targets the Python path
+  instead. The whole adapter lives in the plugin itself, which shells out
+  to the real `cerberus guard` binary and translates both directions;
+  `cerberus guard`/`cerberus health` needed zero changes. Hermes's registry
+  has around 86 tools with no per-tool matcher of its own, so the plugin
+  carries a `GUARDED_TOOLS` allowlist mapping the handful cerberus guards
+  (`terminal`, `write_file`, `patch`) to their canonical
+  `Bash`/`Write`/`Edit` names, confirmed from Hermes's own tools reference
+  — deliberately excluding tools like `process` whose argument shape isn't
+  confirmed to be a real shell command, and passing `tool_input` through
+  unchanged rather than guessing at a field-name remap. The plugin's
+  manifest is a best effort against Hermes's documented plugin-discovery
+  conventions, not verified against the real `hermes-agent` binary —
+  `cerberus init` says so explicitly and points at `hermes doctor`.
 - **Cursor support.** `cerberus init` now wires `cerberus guard` into
   `~/.cursor/hooks.json`'s `beforeShellExecution` and `beforeMCPExecution`
   events when a `~/.cursor` directory exists. Unlike Codex, Cursor's
