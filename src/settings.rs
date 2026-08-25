@@ -1,7 +1,7 @@
-use crate::paths::Paths;
 use serde_json::{Value, json};
 use std::fs;
 use std::io;
+use std::path::Path;
 
 /// The tools `cerberus guard` is wired to judge: the ones that change state
 /// or reach the network. The read-only tools (Read, Grep, Glob) are
@@ -117,21 +117,30 @@ pub fn merge(settings: Value) -> (Value, MergeReport) {
     (settings, report)
 }
 
-/// Reads `paths.claude_settings_json()` (treating a missing file as `{}`),
-/// backs it up to a sibling `.bak-pre-cerberus-init` file if it existed,
-/// merges in cerberus's hook entries, and writes the result back.
-pub fn install_hooks(paths: &Paths) -> io::Result<MergeReport> {
-    let settings_path = paths.claude_settings_json();
+/// Reads `settings_path` (treating a missing file as `{}`), backs it up to
+/// a sibling `<filename>.bak-pre-cerberus-init` file if it existed, merges
+/// in cerberus's hook entries, and writes the result back.
+///
+/// Shared by every harness whose hook config uses this same
+/// `hooks.PreToolUse[]`/`hooks.SessionStart[]` shape — confirmed identical
+/// for Claude Code's `settings.json` (`Paths::claude_settings_json`) and
+/// Codex CLI's `hooks.json` (`Paths::codex_hooks_json`) — so one function
+/// installs into either, keyed only by which path it's pointed at.
+pub fn install_hooks(settings_path: &Path) -> io::Result<MergeReport> {
+    let backup_name = format!(
+        "{}.bak-pre-cerberus-init",
+        settings_path
+            .file_name()
+            .unwrap_or_default()
+            .to_string_lossy()
+    );
 
-    let existing = match fs::read_to_string(&settings_path) {
+    let existing = match fs::read_to_string(settings_path) {
         Ok(raw) => {
             if let Some(parent) = settings_path.parent() {
                 fs::create_dir_all(parent)?;
             }
-            fs::write(
-                settings_path.with_file_name("settings.json.bak-pre-cerberus-init"),
-                &raw,
-            )?;
+            fs::write(settings_path.with_file_name(&backup_name), &raw)?;
             serde_json::from_str(&raw).unwrap_or_else(|_| json!({}))
         }
         Err(_) => json!({}),
@@ -142,7 +151,7 @@ pub fn install_hooks(paths: &Paths) -> io::Result<MergeReport> {
     if let Some(parent) = settings_path.parent() {
         fs::create_dir_all(parent)?;
     }
-    fs::write(&settings_path, serde_json::to_string_pretty(&merged)?)?;
+    fs::write(settings_path, serde_json::to_string_pretty(&merged)?)?;
 
     Ok(report)
 }
@@ -352,6 +361,34 @@ mod tests {
         let sessionstart = merged["hooks"]["SessionStart"].as_array().unwrap();
         assert_eq!(sessionstart.len(), 1);
         assert_eq!(sessionstart[0]["hooks"][0]["command"], "cerberus health");
+    }
+
+    #[test]
+    fn install_hooks_backs_up_with_the_real_filename_not_a_hardcoded_one() {
+        // install_hooks is shared across harnesses now (Claude's
+        // settings.json, Codex's hooks.json, ...), so the backup name has
+        // to be derived from whatever file it's actually pointed at.
+        let dir = std::env::temp_dir().join(format!(
+            "cerberus-settings-test-{}-backup-name",
+            std::process::id()
+        ));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        let hooks_path = dir.join("hooks.json");
+        fs::write(&hooks_path, r#"{"description": "pre-existing"}"#).unwrap();
+
+        install_hooks(&hooks_path).unwrap();
+
+        let backup = dir.join("hooks.json.bak-pre-cerberus-init");
+        assert!(
+            backup.is_file(),
+            "expected a hooks.json-named backup, not settings.json's"
+        );
+        assert_eq!(
+            fs::read_to_string(&backup).unwrap(),
+            r#"{"description": "pre-existing"}"#
+        );
+        fs::remove_dir_all(&dir).ok();
     }
 
     #[test]

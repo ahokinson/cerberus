@@ -17,6 +17,25 @@ three independent heads:
 
 All three run by default and can be disabled individually.
 
+## Harnesses
+
+cerberus started as a Claude Code guard, but nothing about the three heads
+is Claude-specific — only the wire format and hook wiring are, and only by
+accident of being first. Supported so far:
+
+- **Claude Code** — `~/.claude/settings.json`.
+- **Codex CLI** — `~/.codex/hooks.json`. Codex's `PreToolUse`/`SessionStart`
+  hooks use the exact same request/response JSON shape as Claude Code's
+  (confirmed against OpenAI's own docs), so `cerberus guard`/`cerberus
+  health` run completely unmodified; `cerberus init` only had to learn a
+  second file to wire them into. Codex's hooks are also opt-in —
+  `[features] codex_hooks = true` in `~/.codex/config.toml`, without which
+  hooks are silent no-ops — so `cerberus init` sets that too, merging into
+  any existing `config.toml` rather than overwriting it.
+
+More harnesses land as `cerberus init` learns to wire them; see
+`CHANGELOG.md` for what's landed.
+
 ## Scope
 
 `guard` is wired to the tools that change something or reach the network:
@@ -91,6 +110,10 @@ re-run:
   ones running `cerberus guard` or `cerberus health`; it puts each at the
   front of its event so the guard runs first, and leaves every other hook
   exactly where it found it — including one that happens to share a matcher
+- wires the same hooks into `~/.codex/hooks.json` if `codex` is on `$PATH`,
+  with the identical remove-then-prepend idempotency guarantee, and sets
+  `[features] codex_hooks = true` in `~/.codex/config.toml` (Codex's hooks
+  are silent no-ops without it), preserving every other key already there
 
 It finishes with a per-head summary of what's ready: tirith on `$PATH` and
 whether the overlay was written, the cupcake stub/global store and `opa`

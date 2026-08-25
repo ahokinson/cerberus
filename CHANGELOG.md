@@ -9,6 +9,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Codex CLI support.** `cerberus init` now also wires `cerberus guard`/
+  `cerberus health` into `~/.codex/hooks.json` when `codex` is on `$PATH`.
+  Codex's `PreToolUse`/`SessionStart` hooks use the identical request and
+  response JSON shape as Claude Code's, so `guard`/`health` needed no
+  runtime changes at all — only `settings::install_hooks` learning to take
+  a target path instead of assuming `~/.claude/settings.json`, and a second
+  `Paths::codex_hooks_json()` accessor. Codex's hooks are also gated behind
+  their own opt-in: `[features] codex_hooks = true` in `~/.codex/config.toml`
+  — without it, hooks are documented to be silent no-ops, exactly the
+  "quietly stopped working" failure mode `health` exists to catch
+  elsewhere. `cerberus init` now sets that flag too
+  (`init::ensure_codex_hooks_enabled`), merging into any existing
+  `config.toml` and preserving every other key and feature flag, unless
+  the user has explicitly set `codex_hooks = false` themselves — that's
+  left alone and reported as a problem instead of silently overridden.
 - `guard` now runs on every mutating tool, not just Bash:
   `Bash|Write|Edit|NotebookEdit|WebFetch|mcp__.*`. The read-only tools
   (`Read`, `Grep`, `Glob`) are deliberately left out, which keeps the hook

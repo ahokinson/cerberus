@@ -101,9 +101,28 @@ impl Paths {
     }
 
     /// Claude Code's global settings file: where `cerberus init` wires up
-    /// the `PreToolUse`/`SessionStart` hook entries.
+    /// the `PreToolUse`/`SessionStart` hook entries. See also
+    /// [`Self::codex_hooks_json`], wired the same way.
     pub fn claude_settings_json(&self) -> PathBuf {
         self.home.join(".claude/settings.json")
+    }
+
+    /// OpenAI Codex CLI's global hooks file. Confirmed to use the identical
+    /// `hooks.PreToolUse[]`/`hooks.SessionStart[]` shape as Claude Code's
+    /// `settings.json` (down to the nested `{"matcher", "hooks": [{"type",
+    /// "command"}]}` entries), so `settings::install_hooks` wires either
+    /// file with the same code, unmodified.
+    pub fn codex_hooks_json(&self) -> PathBuf {
+        self.home.join(".codex/hooks.json")
+    }
+
+    /// Codex CLI's own config file. Codex's hooks are `Stage::UnderDevelopment`
+    /// — writing `codex_hooks_json()` alone does nothing until
+    /// `[features] codex_hooks = true` is also set here; without it, hooks
+    /// are documented to be silent no-ops. See
+    /// `init::ensure_codex_hooks_enabled`.
+    pub fn codex_config_toml(&self) -> PathBuf {
+        self.home.join(".codex/config.toml")
     }
 
     /// Which heads `cerberus guard` runs. See `config::enabled_heads`.
