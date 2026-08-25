@@ -9,6 +9,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Cursor support.** `cerberus init` now wires `cerberus guard` into
+  `~/.cursor/hooks.json`'s `beforeShellExecution` and `beforeMCPExecution`
+  events when a `~/.cursor` directory exists. Unlike Codex, Cursor's
+  payload shape and response vocabulary genuinely differ from Claude
+  Code's, so `guard::run` now dispatches on the payload's own
+  `hook_event_name` and translates through `src/harness/cursor.rs` in both
+  directions — no `--harness` flag needed, the same `cerberus guard`
+  command line works in every wired harness. Cursor has no pre-write file
+  hook (only the post-hoc `afterFileEdit`), so this only ever covers Bash
+  and MCP tool calls there, never Write/Edit/NotebookEdit — a permanent
+  limit of Cursor's current hook surface, not a gap in cerberus.
+  `violations::respond` was split into `record_if_denied` (counting) plus
+  the caller printing whatever the harness-appropriate output is, since
+  Cursor's response needs reshaping before it's printed but should still
+  count the same way Claude/Codex's does.
 - **Codex CLI support.** `cerberus init` now also wires `cerberus guard`/
   `cerberus health` into `~/.codex/hooks.json` when `codex` is on `$PATH`.
   Codex's `PreToolUse`/`SessionStart` hooks use the identical request and

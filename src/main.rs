@@ -2,6 +2,7 @@ mod config;
 mod embedded;
 mod gate;
 mod guard;
+mod harness;
 mod head;
 mod health;
 mod hook;

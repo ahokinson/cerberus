@@ -68,19 +68,19 @@ pub fn record(path: &Path, head: Head) {
     let _ = write_counts(path, &counts);
 }
 
-/// Common tail for a head's response inside `guard`. Prints `output` (the
-/// full ready-to-print hook JSON a head's `evaluate` produced) and, if
-/// it's an actual deny rather than e.g. cupcake's `ask`, records the
-/// violation against the session (if one was present on the hook event).
-/// An `ask` still short-circuits `guard` and reaches Claude Code, but isn't
-/// counted as a violation.
-pub fn respond(paths: &Paths, session_id: Option<&str>, head: Head, output: &str) {
+/// Records a violation against the session if `output` (the Claude-shaped
+/// hook JSON a head's `evaluate` produced) is an actual deny rather than
+/// e.g. cupcake's `ask`, and a session id was present on the hook event.
+/// `guard::run` calls this directly rather than printing `output` itself,
+/// since a harness whose response needs reshaping before it's printed
+/// (see `harness::cursor::from_decision`) still needs the same counting
+/// behavior against the pre-translation, Claude-shaped decision.
+pub fn record_if_denied(paths: &Paths, session_id: Option<&str>, head: Head, output: &str) {
     if is_deny(output)
         && let Some(session_id) = session_id
     {
         record(&paths.violations_file(session_id), head);
     }
-    println!("{output}");
 }
 
 #[cfg(test)]

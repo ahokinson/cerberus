@@ -1,4 +1,5 @@
 use crate::embedded;
+use crate::harness::cursor;
 use crate::head::Head;
 use crate::integrations::cupcake;
 use crate::paths::Paths;
@@ -427,6 +428,40 @@ pub fn run(paths: &Paths) -> i32 {
         }
     } else {
         println!("codex: not on PATH, skipping hooks.json wiring");
+    }
+
+    // Cursor is a GUI app, not reliably a CLI on PATH, so detect it by its
+    // own config directory instead of `command_exists`.
+    let cursor_present = paths.home.join(".cursor").is_dir();
+    if cursor_present {
+        match cursor::install_hooks(&paths.cursor_hooks_json()) {
+            Ok(report) => {
+                if report.before_shell_execution_changed {
+                    println!(
+                        "cursor hooks.json: `cerberus guard` now runs first on beforeShellExecution"
+                    );
+                } else {
+                    println!("cursor hooks.json: beforeShellExecution entry already up to date");
+                }
+                if report.before_mcp_execution_changed {
+                    println!(
+                        "cursor hooks.json: `cerberus guard` now runs first on beforeMCPExecution"
+                    );
+                } else {
+                    println!("cursor hooks.json: beforeMCPExecution entry already up to date");
+                }
+                println!(
+                    "cursor hooks.json: note — Cursor has no pre-write file hook, so Write/\
+                    Edit/NotebookEdit-equivalent calls are not guarded there"
+                );
+            }
+            Err(e) => problems.push(format!(
+                "couldn't update {}: {e}",
+                paths.cursor_hooks_json().display()
+            )),
+        }
+    } else {
+        println!("cursor: no ~/.cursor directory found, skipping hooks.json wiring");
     }
 
     println!("\nper-head status:");

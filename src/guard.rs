@@ -1,5 +1,6 @@
 use crate::config;
 use crate::gate;
+use crate::harness::cursor;
 use crate::head::Head;
 use crate::hook::{parse_json, read_stdin_raw, str_field};
 use crate::integrations::{cupcake, tirith};
@@ -24,10 +25,19 @@ fn dispatch(
     None
 }
 
-/// The single `PreToolUse` command Claude Code calls for Bash: `gate` runs
-/// first, unconditionally; if it allows, the heads enabled in
+/// The single `PreToolUse`-equivalent command every wired harness calls:
+/// `gate` runs first, unconditionally; if it allows, the heads enabled in
 /// `config::enabled_heads` run in their fixed order, stopping at the first
 /// one that responds (deny or ask).
+///
+/// Cursor's payload shape differs enough from Claude/Codex's that it needs
+/// translating into their shared envelope before anything downstream sees
+/// it (`harness::cursor::to_canonical`); every other harness — including
+/// Codex, whose shape already matches Claude's byte-for-byte — takes
+/// today's path completely unchanged. Dispatch is self-describing from the
+/// payload's own `hook_event_name`, so `cerberus guard` needs no
+/// `--harness` flag: the identical command line works verbatim in every
+/// harness's hook config.
 pub fn run(paths: &Paths) {
     if let Some(output) = gate::evaluate(&paths.degraded_sentinel()) {
         println!("{output}");
@@ -35,7 +45,17 @@ pub fn run(paths: &Paths) {
     }
 
     let raw = read_stdin_raw();
-    let input = parse_json(&raw);
+    let parsed = parse_json(&raw);
+
+    let canonical = cursor::to_canonical(&parsed);
+    let is_cursor = canonical.is_some();
+    let input = canonical.unwrap_or(parsed);
+    // cupcake forwards its input verbatim; for a translated payload
+    // "verbatim" has to mean the canonical envelope, since that's the only
+    // shape cerberus's own Rego policies (and cupcake's `--harness claude`
+    // store) understand.
+    let raw_for_policy = if is_cursor { input.to_string() } else { raw };
+
     let cwd: PathBuf = str_field(&input, "cwd")
         .map(PathBuf::from)
         .unwrap_or_else(|| std::env::current_dir().unwrap_or_default());
@@ -44,12 +64,20 @@ pub fn run(paths: &Paths) {
     let heads = config::enabled_heads(paths);
     let result = dispatch(&heads, |head| match head {
         Head::Risk => tirith::evaluate(paths, &cwd, &input),
-        Head::Policy => cupcake::evaluate(&paths.cupcake_stub(), &raw),
+        Head::Policy => cupcake::evaluate(&paths.cupcake_stub(), &raw_for_policy),
         Head::Judgement => rules::evaluate(&paths.rule_scripts_dir(), &input, &cwd),
     });
 
     if let Some((head, output)) = result {
-        violations::respond(paths, session_id, head, &output);
+        violations::record_if_denied(paths, session_id, head, &output);
+        let printed = if is_cursor {
+            cursor::from_decision(&output)
+        } else {
+            Some(output)
+        };
+        if let Some(text) = printed {
+            println!("{text}");
+        }
     }
 }
 

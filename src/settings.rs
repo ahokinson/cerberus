@@ -9,7 +9,10 @@ use std::path::Path;
 /// hook off the hottest tools in a session is what lets `guard` stay a
 /// subprocess-per-call design without a cache.
 const GUARD_MATCHER: &str = "Bash|Write|Edit|NotebookEdit|WebFetch|mcp__.*";
-const GUARD_COMMAND: &str = "cerberus guard";
+/// `pub(crate)`: `harness::cursor`'s own merge logic runs the same
+/// remove-then-prepend idea against a differently-shaped hooks array and
+/// needs to key on the identical command string.
+pub(crate) const GUARD_COMMAND: &str = "cerberus guard";
 const HEALTH_COMMAND: &str = "cerberus health";
 
 /// What [`merge`] actually changed, so `init` can report it to the user.
@@ -24,8 +27,11 @@ fn command_hook(command: &str) -> Value {
 }
 
 /// Coerces `parent[key]` to an array and hands it back, replacing whatever
-/// was there if it wasn't one.
-fn array_entry<'a>(parent: &'a mut Value, key: &str) -> &'a mut Vec<Value> {
+/// was there if it wasn't one. `pub(crate)`: shared with `harness::cursor`,
+/// whose `hooks.json` shape needs the same array-or-replace coercion even
+/// though its entries don't nest a second `hooks` array the way Claude's
+/// and Codex's do.
+pub(crate) fn array_entry<'a>(parent: &'a mut Value, key: &str) -> &'a mut Vec<Value> {
     let slot = parent
         .as_object_mut()
         .expect("caller coerced parent to an object")
@@ -117,16 +123,19 @@ pub fn merge(settings: Value) -> (Value, MergeReport) {
     (settings, report)
 }
 
-/// Reads `settings_path` (treating a missing file as `{}`), backs it up to
-/// a sibling `<filename>.bak-pre-cerberus-init` file if it existed, merges
-/// in cerberus's hook entries, and writes the result back.
-///
-/// Shared by every harness whose hook config uses this same
-/// `hooks.PreToolUse[]`/`hooks.SessionStart[]` shape — confirmed identical
-/// for Claude Code's `settings.json` (`Paths::claude_settings_json`) and
-/// Codex CLI's `hooks.json` (`Paths::codex_hooks_json`) — so one function
-/// installs into either, keyed only by which path it's pointed at.
-pub fn install_hooks(settings_path: &Path) -> io::Result<MergeReport> {
+/// Shared skeleton for idempotently installing cerberus's hooks into a JSON
+/// config file, regardless of that harness's exact hook-array shape: reads
+/// `settings_path` (treating a missing file as `{}`), backs it up to a
+/// sibling `<filename>.bak-pre-cerberus-init` file if it existed, hands the
+/// parsed value to `merge_fn` to produce the new content plus a
+/// shape-specific report, then writes the result back. [`merge`]
+/// (Claude/Codex's nested-array shape) and `harness::cursor`'s own
+/// flat-array merge both build on this, so the file I/O and backup
+/// contract only exists once.
+pub fn install_into<R>(
+    settings_path: &Path,
+    merge_fn: impl FnOnce(Value) -> (Value, R),
+) -> io::Result<R> {
     let backup_name = format!(
         "{}.bak-pre-cerberus-init",
         settings_path
@@ -146,7 +155,7 @@ pub fn install_hooks(settings_path: &Path) -> io::Result<MergeReport> {
         Err(_) => json!({}),
     };
 
-    let (merged, report) = merge(existing);
+    let (merged, report) = merge_fn(existing);
 
     if let Some(parent) = settings_path.parent() {
         fs::create_dir_all(parent)?;
@@ -154,6 +163,13 @@ pub fn install_hooks(settings_path: &Path) -> io::Result<MergeReport> {
     fs::write(settings_path, serde_json::to_string_pretty(&merged)?)?;
 
     Ok(report)
+}
+
+/// Installs cerberus's hooks using [`merge`] — Claude Code's and Codex
+/// CLI's shared nested-array shape. See [`install_into`] for the shared
+/// file-handling contract.
+pub fn install_hooks(settings_path: &Path) -> io::Result<MergeReport> {
+    install_into(settings_path, merge)
 }
 
 #[cfg(test)]

@@ -125,6 +125,14 @@ impl Paths {
         self.home.join(".codex/config.toml")
     }
 
+    /// Cursor's global hooks file. Unlike Claude/Codex's shared shape,
+    /// Cursor's `hooks.json` splits `beforeShellExecution`/
+    /// `beforeMCPExecution` into flat per-event arrays with no nested
+    /// `hooks` array of their own — see `harness::cursor::install_hooks`.
+    pub fn cursor_hooks_json(&self) -> PathBuf {
+        self.home.join(".cursor/hooks.json")
+    }
+
     /// Which heads `cerberus guard` runs. See `config::enabled_heads`.
     pub fn config_file(&self) -> PathBuf {
         self.config_home.join("cerberus/config.toml")

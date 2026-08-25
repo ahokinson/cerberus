@@ -32,6 +32,16 @@ accident of being first. Supported so far:
   `[features] codex_hooks = true` in `~/.codex/config.toml`, without which
   hooks are silent no-ops — so `cerberus init` sets that too, merging into
   any existing `config.toml` rather than overwriting it.
+- **Cursor** — `~/.cursor/hooks.json`. Cursor's `beforeShellExecution`/
+  `beforeMCPExecution` hooks send a genuinely different payload shape and
+  expect a different response vocabulary (`permission` rather than
+  `permissionDecision`), so `cerberus guard` translates in both directions
+  (`src/harness/cursor.rs`) — dispatched automatically from the payload's
+  own `hook_event_name`, no `--harness` flag needed. **Cursor has no
+  pre-write file hook** (only the post-hoc `afterFileEdit`), so cerberus
+  can only guard Cursor's Bash and MCP tool calls, never
+  Write/Edit/NotebookEdit — a permanent limit of Cursor's current hook
+  surface, not a gap in cerberus.
 
 More harnesses land as `cerberus init` learns to wire them; see
 `CHANGELOG.md` for what's landed.
@@ -114,6 +124,10 @@ re-run:
   with the identical remove-then-prepend idempotency guarantee, and sets
   `[features] codex_hooks = true` in `~/.codex/config.toml` (Codex's hooks
   are silent no-ops without it), preserving every other key already there
+- wires `cerberus guard` into `~/.cursor/hooks.json`'s
+  `beforeShellExecution` and `beforeMCPExecution` events if a `~/.cursor`
+  directory exists — Cursor's own hooks are additive across scope layers,
+  so this only ever adds cerberus's entry, never touching anyone else's
 
 It finishes with a per-head summary of what's ready: tirith on `$PATH` and
 whether the overlay was written, the cupcake stub/global store and `opa`
