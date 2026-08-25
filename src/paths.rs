@@ -116,8 +116,8 @@ impl Paths {
         self.home.join(".codex/hooks.json")
     }
 
-    /// Codex CLI's own config file. Codex's hooks are `Stage::UnderDevelopment`
-    /// — writing `codex_hooks_json()` alone does nothing until
+    /// Codex CLI's own config file. Codex's hooks are `Stage::UnderDevelopment`,
+    /// so writing `codex_hooks_json()` alone does nothing until
     /// `[features] codex_hooks = true` is also set here; without it, hooks
     /// are documented to be silent no-ops. See
     /// `init::ensure_codex_hooks_enabled`.
@@ -128,14 +128,14 @@ impl Paths {
     /// Cursor's global hooks file. Unlike Claude/Codex's shared shape,
     /// Cursor's `hooks.json` splits `beforeShellExecution`/
     /// `beforeMCPExecution` into flat per-event arrays with no nested
-    /// `hooks` array of their own — see `harness::cursor::install_hooks`.
+    /// `hooks` array of their own. See `harness::cursor::install_hooks`.
     pub fn cursor_hooks_json(&self) -> PathBuf {
         self.home.join(".cursor/hooks.json")
     }
 
     /// Hermes Agent's plugin directory reserved for cerberus's own plugin
-    /// (`embedded::HERMES_PLUGIN`) — a Python `pre_tool_call` hook that
-    /// shells out to `cerberus guard`, rather than a config file cerberus
+    /// (`embedded::HERMES_PLUGIN`), a Python `pre_tool_call` hook that
+    /// shells out to `cerberus guard` rather than a config file cerberus
     /// merges into. See `init::write_hermes_plugin`.
     pub fn hermes_plugin_dir(&self) -> PathBuf {
         self.home.join(".hermes/plugins/cerberus")
@@ -143,7 +143,7 @@ impl Paths {
 
     /// opencode's global plugin directory. cerberus writes a single file
     /// here (`embedded::OPENCODE_PLUGIN`) rather than a config file to
-    /// merge into — opencode plugins are auto-loaded in-process
+    /// merge into: opencode plugins are auto-loaded in-process
     /// TypeScript/JavaScript, not a subprocess/stdin contract. See
     /// `init::write_opencode_plugin`.
     pub fn opencode_plugin_dir(&self) -> PathBuf {

@@ -64,10 +64,10 @@ fn write_hermes_plugin(dir: &Path) -> io::Result<usize> {
 
 /// Writes cerberus's shipped opencode plugin (`embedded::OPENCODE_PLUGIN`)
 /// as a single file into `dir`, creating it if needed. Always overwritten,
-/// same canonical-content contract as the rule scripts/policies — the
-/// filename is distinctive precisely because, unlike Hermes's reserved
-/// per-plugin subdirectory, opencode's plugin directory is shared with
-/// every other plugin a user has installed.
+/// same canonical-content contract as the rule scripts/policies. The
+/// filename is distinctive because, unlike Hermes's reserved per-plugin
+/// subdirectory, opencode's plugin directory is shared with every other
+/// plugin a user has installed.
 fn write_opencode_plugin(dir: &Path) -> io::Result<()> {
     fs::create_dir_all(dir)?;
     fs::write(dir.join("cerberus-guard.ts"), embedded::OPENCODE_PLUGIN)
@@ -117,18 +117,18 @@ enum CodexFeatureOutcome {
 }
 
 /// Ensures `[features] codex_hooks = true` in `config_path` (Codex's own
-/// `config.toml`). Codex's hook engine is `Stage::UnderDevelopment` —
+/// `config.toml`). Codex's hook engine is `Stage::UnderDevelopment`, so
 /// writing `hooks.json` alone does nothing until this flag is also set;
-/// without it, hooks are documented to be silent no-ops, exactly the
+/// without it, hooks are documented to be silent no-ops, the same
 /// "quietly stopped working" failure mode cerberus's own `health` exists
-/// to catch elsewhere. Merges into any existing `config.toml` (preserving
-/// every other key and every other feature flag), the same
-/// non-destructive spirit as `settings::merge`.
+/// to catch elsewhere. Merges into any existing `config.toml`, preserving
+/// every other key and feature flag, the same non-destructive spirit as
+/// `settings::merge`.
 ///
 /// Only ever sets the flag when it's absent. If a user explicitly set
-/// `codex_hooks = false` themselves, that's respected rather than
-/// silently overridden — reported as a problem instead, since cerberus's
-/// hooks won't fire until it's removed.
+/// `codex_hooks = false` themselves, that's respected: reported as a
+/// problem instead of silently overridden, since cerberus's hooks won't
+/// fire until it's removed.
 fn ensure_codex_hooks_enabled(config_path: &Path) -> CodexFeatureOutcome {
     let mut doc: toml::Value = fs::read_to_string(config_path)
         .ok()
@@ -256,8 +256,8 @@ fn yes_no(b: bool) -> &'static str {
 /// Bootstraps everything cerberus needs: writes the rule scripts, seeds a
 /// default `config.toml`, ensures the cupcake stub project exists, and
 /// wires `cerberus guard`/`cerberus health` into whichever harnesses are
-/// actually present (Claude Code, Codex CLI, Cursor, Hermes, opencode) —
-/// each behind its own detection check, so running `init` on a machine
+/// actually present (Claude Code, Codex CLI, Cursor, Hermes, opencode),
+/// each behind its own detection check. Running `init` on a machine
 /// without a given harness installed doesn't create files for it.
 ///
 /// Prints a summary per artifact as it goes, then one per head (see
@@ -447,7 +447,7 @@ pub fn run(paths: &Paths) -> i32 {
                 println!("codex config.toml: `[features] codex_hooks` already enabled")
             }
             CodexFeatureOutcome::ExplicitlyDisabled => problems.push(format!(
-                "{} has `[features] codex_hooks = false` set explicitly — cerberus's Codex \
+                "{} has `[features] codex_hooks = false` set explicitly. cerberus's Codex \
                 hooks are installed but will not fire until that line is removed (left alone \
                 since you set it, not cerberus)",
                 paths.codex_config_toml().display()
@@ -482,7 +482,7 @@ pub fn run(paths: &Paths) -> i32 {
                     println!("cursor hooks.json: beforeMCPExecution entry already up to date");
                 }
                 println!(
-                    "cursor hooks.json: note — Cursor has no pre-write file hook, so Write/\
+                    "cursor hooks.json: note: Cursor has no pre-write file hook, so Write/\
                     Edit/NotebookEdit-equivalent calls are not guarded there"
                 );
             }
@@ -500,7 +500,7 @@ pub fn run(paths: &Paths) -> i32 {
         let plugin_dir = paths.hermes_plugin_dir();
         match write_hermes_plugin(&plugin_dir) {
             Ok(n) => println!(
-                "hermes plugin: wrote {n} file(s) to {} — verify with `hermes hooks list` or \
+                "hermes plugin: wrote {n} file(s) to {}. Verify with `hermes hooks list` or \
                 `hermes doctor`; this plugin's manifest is a best effort against Hermes's \
                 documented format, not verified against the real binary",
                 plugin_dir.display()
@@ -519,7 +519,7 @@ pub fn run(paths: &Paths) -> i32 {
         let plugin_dir = paths.opencode_plugin_dir();
         match write_opencode_plugin(&plugin_dir) {
             Ok(()) => println!(
-                "opencode plugin: wrote cerberus-guard.ts to {} — best effort against opencode's \
+                "opencode plugin: wrote cerberus-guard.ts to {}. Best effort against opencode's \
                 documented plugin API (tool.execute.before, no per-tool matcher of its own), not \
                 verified against the real binary",
                 plugin_dir.display()

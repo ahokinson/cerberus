@@ -9,77 +9,72 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
-- **opencode support.** `cerberus init` now writes a single TypeScript
-  plugin (`harness-templates/opencode/cerberus-guard.ts`, embedded as
+- **opencode support.** `cerberus init` writes a single TypeScript plugin
+  (`harness-templates/opencode/cerberus-guard.ts`, embedded as
   `embedded::OPENCODE_PLUGIN`) into `~/.config/opencode/plugins/` when
-  `opencode` is on `$PATH`. Like Hermes, opencode plugins run in-process
-  rather than as a subprocess given JSON on stdin — here an in-process
-  `tool.execute.before` TypeScript hook that shells out to the real
-  `cerberus guard` binary via Bun's `$` shell (piping stdin through
-  `new Response(payload)`, since Bun's `$` has no dedicated `.stdin()`
-  method). Unlike the other three harnesses, opencode has no per-tool
-  matcher of its own — the hook fires for every tool call — so the plugin
-  carries its own allowlist (`bash`/`edit`/`write`/`webfetch` →
-  `Bash`/`Edit`/`Write`/`WebFetch`) doing the job `GUARD_MATCHER` does
-  elsewhere. opencode's own tool-arg field names are camelCase
-  (`filePath`); the plugin remaps them to the snake_case shape
-  (`file_path`) every existing rule already expects. Verified end-to-end
-  against the real `cerberus` binary via Bun, including a synthetic `edit`
-  on a Claude `settings.json` correctly triggering SANDBOX-003 through the
-  camelCase remapping — though the plugin API details themselves are
-  cerberus's best effort against opencode's docs, not exhaustively
-  confirmed for every built-in tool's argument shape.
-- **Hermes Agent support.** `cerberus init` now writes a small Python
-  plugin (`harness-templates/hermes/`, embedded as
-  `embedded::HERMES_PLUGIN`) into `~/.hermes/plugins/cerberus/` when
-  `hermes` is on `$PATH`. Hermes's best-documented integration surface is
-  an in-process Python `pre_tool_call` callback, not a subprocess/stdin
-  contract like Claude Code, Codex CLI, and Cursor — Hermes does have a
-  config.yaml-driven shell-hook path too, but its exact stdin/stdout
-  contract isn't documented anywhere, so cerberus targets the Python path
-  instead. The whole adapter lives in the plugin itself, which shells out
-  to the real `cerberus guard` binary and translates both directions;
-  `cerberus guard`/`cerberus health` needed zero changes. Hermes's registry
-  has around 86 tools with no per-tool matcher of its own, so the plugin
+  `opencode` is on `$PATH`. opencode plugins run in-process rather than as
+  a subprocess given JSON on stdin, so the plugin's `tool.execute.before`
+  hook shells out to the real `cerberus guard` binary via Bun's `$` shell,
+  piping stdin through `new Response(payload)` since Bun's `$` has no
+  `.stdin()` method. opencode has no per-tool matcher of its own, so the
+  plugin carries its own allowlist (`bash`/`edit`/`write`/`webfetch` →
+  `Bash`/`Edit`/`Write`/`WebFetch`), the job `GUARD_MATCHER` does
+  elsewhere. Its argument field names are camelCase (`filePath`); the
+  plugin remaps them to the snake_case shape (`file_path`) every rule
+  expects. Verified against the real `cerberus` binary via Bun, including
+  a synthetic `edit` on a Claude `settings.json` that correctly triggers
+  SANDBOX-003 through the remap, though the plugin API itself is a best
+  effort against opencode's docs, not exhaustively confirmed for every
+  built-in tool's argument shape.
+- **Hermes Agent support.** `cerberus init` writes a small Python plugin
+  (`harness-templates/hermes/`, embedded as `embedded::HERMES_PLUGIN`)
+  into `~/.hermes/plugins/cerberus/` when `hermes` is on `$PATH`. Hermes's
+  best-documented integration point is an in-process Python
+  `pre_tool_call` callback, not a subprocess given JSON on stdin like
+  Claude Code, Codex CLI, and Cursor. (Hermes also has a config.yaml-driven
+  shell-hook path, but its stdin/stdout contract isn't documented
+  anywhere, so cerberus targets the Python path instead.) The plugin
+  shells out to the real `cerberus guard` binary and translates both
+  directions; `guard`/`health` needed no changes. Hermes's registry has
+  around 86 tools with no per-tool matcher of its own, so the plugin
   carries a `GUARDED_TOOLS` allowlist mapping the handful cerberus guards
   (`terminal`, `write_file`, `patch`) to their canonical
-  `Bash`/`Write`/`Edit` names, confirmed from Hermes's own tools reference
-  — deliberately excluding tools like `process` whose argument shape isn't
-  confirmed to be a real shell command, and passing `tool_input` through
+  `Bash`/`Write`/`Edit` names, confirmed from Hermes's own tools
+  reference. `process` is excluded since its argument shape isn't
+  confirmed to be a real shell command, and `tool_input` is passed through
   unchanged rather than guessing at a field-name remap. The plugin's
-  manifest is a best effort against Hermes's documented plugin-discovery
-  conventions, not verified against the real `hermes-agent` binary —
-  `cerberus init` says so explicitly and points at `hermes doctor`.
-- **Cursor support.** `cerberus init` now wires `cerberus guard` into
+  manifest follows Hermes's documented plugin-discovery format but hasn't
+  been checked against the real binary; `cerberus init` says so and points
+  at `hermes doctor`.
+- **Cursor support.** `cerberus init` wires `cerberus guard` into
   `~/.cursor/hooks.json`'s `beforeShellExecution` and `beforeMCPExecution`
-  events when a `~/.cursor` directory exists. Unlike Codex, Cursor's
-  payload shape and response vocabulary genuinely differ from Claude
-  Code's, so `guard::run` now dispatches on the payload's own
-  `hook_event_name` and translates through `src/harness/cursor.rs` in both
-  directions — no `--harness` flag needed, the same `cerberus guard`
-  command line works in every wired harness. Cursor has no pre-write file
-  hook (only the post-hoc `afterFileEdit`), so this only ever covers Bash
-  and MCP tool calls there, never Write/Edit/NotebookEdit — a permanent
-  limit of Cursor's current hook surface, not a gap in cerberus.
-  `violations::respond` was split into `record_if_denied` (counting) plus
-  the caller printing whatever the harness-appropriate output is, since
-  Cursor's response needs reshaping before it's printed but should still
-  count the same way Claude/Codex's does.
-- **Codex CLI support.** `cerberus init` now also wires `cerberus guard`/
+  events when a `~/.cursor` directory exists. Cursor's payload shape and
+  response vocabulary differ from Claude Code's, so `guard::run` now
+  dispatches on the payload's own `hook_event_name` and translates both
+  directions through `src/harness/cursor.rs`. No `--harness` flag is
+  needed: the same `cerberus guard` command line works in every wired
+  harness. Cursor has no pre-write file hook, only the post-hoc
+  `afterFileEdit`, so this covers Bash and MCP calls only, never
+  Write/Edit/NotebookEdit, a permanent limit of Cursor's hook surface,
+  not a gap in cerberus. `violations::respond` was split into
+  `record_if_denied` (counting) plus the caller printing whatever output
+  the harness needs, since Cursor's response needs reshaping before
+  printing but should still count the same way Claude/Codex's does.
+- **Codex CLI support.** `cerberus init` also wires `cerberus guard`/
   `cerberus health` into `~/.codex/hooks.json` when `codex` is on `$PATH`.
   Codex's `PreToolUse`/`SessionStart` hooks use the identical request and
-  response JSON shape as Claude Code's, so `guard`/`health` needed no
-  runtime changes at all — only `settings::install_hooks` learning to take
-  a target path instead of assuming `~/.claude/settings.json`, and a second
-  `Paths::codex_hooks_json()` accessor. Codex's hooks are also gated behind
-  their own opt-in: `[features] codex_hooks = true` in `~/.codex/config.toml`
-  — without it, hooks are documented to be silent no-ops, exactly the
-  "quietly stopped working" failure mode `health` exists to catch
-  elsewhere. `cerberus init` now sets that flag too
+  response shape as Claude Code's, so `guard`/`health` needed no runtime
+  changes, only `settings::install_hooks` taking a target path instead of
+  assuming `~/.claude/settings.json`, and a second
+  `Paths::codex_hooks_json()` accessor. Codex's hooks are also gated
+  behind their own opt-in, `[features] codex_hooks = true` in
+  `~/.codex/config.toml`; without it, hooks are documented to be silent
+  no-ops, the same "quietly stopped working" failure mode `health` exists
+  to catch elsewhere. `cerberus init` now sets that flag too
   (`init::ensure_codex_hooks_enabled`), merging into any existing
-  `config.toml` and preserving every other key and feature flag, unless
-  the user has explicitly set `codex_hooks = false` themselves — that's
-  left alone and reported as a problem instead of silently overridden.
+  `config.toml` and preserving every other key and feature flag unless the
+  user set `codex_hooks = false` explicitly, in which case it's left alone
+  and reported as a problem instead.
 - `guard` now runs on every mutating tool, not just Bash:
   `Bash|Write|Edit|NotebookEdit|WebFetch|mcp__.*`. The read-only tools
   (`Read`, `Grep`, `Glob`) are deliberately left out, which keeps the hook

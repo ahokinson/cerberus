@@ -4,7 +4,7 @@
 //! `tool_name`/`tool_input` envelope, and a different response vocabulary
 //! (`permission` rather than `permissionDecision`). Every Cursor hook
 //! payload carries a `hook_event_name` field cerberus dispatches on
-//! directly — see `guard::run` — so no `--harness` flag is needed.
+//! directly (see `guard::run`), so no `--harness` flag is needed.
 //!
 //! Cursor has no pre-write file hook (only the post-hoc `afterFileEdit`),
 //! so cerberus can only guard Cursor's Bash and MCP tool calls, never
@@ -14,8 +14,8 @@
 //! Cursor's `hooks.json` is additive across scope layers (enterprise/team/
 //! project/user all run), unlike Claude's single contested array, so
 //! [`install_hooks`] only needs idempotent add-if-missing, not the
-//! remove-then-prepend dance `settings::merge` does — though it still
-//! prepends, to keep cerberus first defensively.
+//! remove-then-prepend dance `settings::merge` does, though it still
+//! prepends to keep cerberus first defensively.
 
 use crate::hook::permission_decision;
 use crate::settings::{GUARD_COMMAND, array_entry, install_into};

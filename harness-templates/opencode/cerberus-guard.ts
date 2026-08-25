@@ -9,9 +9,9 @@ import type { Plugin } from "@opencode-ai/plugin"
  * `cerberus guard` binary on `tool.execute.before` and translates both
  * directions. `cerberus guard` itself needs no opencode-specific code.
  *
- * opencode has no per-tool matcher config like the other three harnesses
- * — `tool.execute.before` fires for *every* tool call — so GUARDED_TOOLS
- * below does the job cerberus's own GUARD_MATCHER does elsewhere: keeping
+ * opencode has no per-tool matcher config like the other three harnesses:
+ * `tool.execute.before` fires for *every* tool call, so GUARDED_TOOLS
+ * below does the job cerberus's own GUARD_MATCHER does elsewhere, keeping
  * cerberus off the hot read path (read/glob/grep/list/...) instead of
  * spawning a subprocess on every single tool call.
  *
@@ -67,7 +67,7 @@ export const CerberusGuard: Plugin = async ({ $, directory }) => {
       } catch {
         // cerberus not on PATH, or the shell call itself failed: fail
         // open, matching cerberus's own fail-open-per-head philosophy for
-        // a broken integration layer — a broken plugin must never itself
+        // a broken integration layer. A broken plugin must never itself
         // become the reason a call goes ungoverned in a way that looks
         // like it was reviewed.
         return

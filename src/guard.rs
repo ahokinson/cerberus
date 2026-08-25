@@ -32,9 +32,9 @@ fn dispatch(
 ///
 /// Cursor's payload shape differs enough from Claude/Codex's that it needs
 /// translating into their shared envelope before anything downstream sees
-/// it (`harness::cursor::to_canonical`); every other harness — including
-/// Codex, whose shape already matches Claude's byte-for-byte — takes
-/// today's path completely unchanged. Dispatch is self-describing from the
+/// it (`harness::cursor::to_canonical`). Every other harness takes today's
+/// path completely unchanged, including Codex, whose shape already
+/// matches Claude's byte-for-byte. Dispatch is self-describing from the
 /// payload's own `hook_event_name`, so `cerberus guard` needs no
 /// `--harness` flag: the identical command line works verbatim in every
 /// harness's hook config.

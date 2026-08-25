@@ -165,7 +165,7 @@ pub fn install_into<R>(
     Ok(report)
 }
 
-/// Installs cerberus's hooks using [`merge`] — Claude Code's and Codex
+/// Installs cerberus's hooks using [`merge`], Claude Code's and Codex
 /// CLI's shared nested-array shape. See [`install_into`] for the shared
 /// file-handling contract.
 pub fn install_hooks(settings_path: &Path) -> io::Result<MergeReport> {

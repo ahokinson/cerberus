@@ -2,12 +2,11 @@
 
 <img src="assets/logo.svg" alt="cerberus logo: three dog heads over a shield" width="200">
 
-A guard for Claude Code's tool calls, with three heads.
+A guard for AI agent tool calls, with three heads.
 
-cerberus is a Rust CLI that runs as a `PreToolUse` hook and judges every
-state-changing tool call before Claude Code executes it. Claude Code only
-ever calls `cerberus guard`, which runs a fail-closed `gate` and then up to
-three independent heads:
+cerberus is a Rust CLI that judges every state-changing tool call before
+an agent executes it, regardless of which harness is asking. `cerberus
+guard` runs a fail-closed `gate` and then up to three independent heads:
 
 | Head | Catches | How |
 | --- | --- | --- |
@@ -19,61 +18,54 @@ All three run by default and can be disabled individually.
 
 ## Harnesses
 
-cerberus started as a Claude Code guard, but nothing about the three heads
-is Claude-specific — only the wire format and hook wiring are, and only by
-accident of being first. Supported so far:
+The three heads have no idea which harness triggered them. Each harness's
+own wire format and hook-registration mechanism gets normalized at the
+edge, in `cerberus guard` and `cerberus init`; the rules, the policies,
+and the tirith overlay all run once, unmodified, no matter where the call
+came from. `cerberus init` wires whichever of these are actually
+installed, each behind its own detection check, so running it on a
+machine without a given harness doesn't touch that harness's files at
+all:
 
-- **Claude Code** — `~/.claude/settings.json`, wired if `claude` is on `$PATH`.
-- **Codex CLI** — `~/.codex/hooks.json`. Codex's `PreToolUse`/`SessionStart`
-  hooks use the exact same request/response JSON shape as Claude Code's
-  (confirmed against OpenAI's own docs), so `cerberus guard`/`cerberus
-  health` run completely unmodified; `cerberus init` only had to learn a
-  second file to wire them into. Codex's hooks are also opt-in —
-  `[features] codex_hooks = true` in `~/.codex/config.toml`, without which
-  hooks are silent no-ops — so `cerberus init` sets that too, merging into
-  any existing `config.toml` rather than overwriting it.
-- **Cursor** — `~/.cursor/hooks.json`. Cursor's `beforeShellExecution`/
-  `beforeMCPExecution` hooks send a genuinely different payload shape and
-  expect a different response vocabulary (`permission` rather than
-  `permissionDecision`), so `cerberus guard` translates in both directions
-  (`src/harness/cursor.rs`) — dispatched automatically from the payload's
-  own `hook_event_name`, no `--harness` flag needed. **Cursor has no
-  pre-write file hook** (only the post-hoc `afterFileEdit`), so cerberus
-  can only guard Cursor's Bash and MCP tool calls, never
-  Write/Edit/NotebookEdit — a permanent limit of Cursor's current hook
-  surface, not a gap in cerberus.
-- **Hermes Agent** — `~/.hermes/plugins/cerberus/`. Hermes's
-  best-documented integration surface is an in-process Python
-  `pre_tool_call` callback, not a subprocess/stdin contract like the other
-  three, so `cerberus init` writes a small Python plugin
+- **Claude Code** — `~/.claude/settings.json`, wired if `claude` is on
+  `$PATH`. The first harness cerberus supported, and still the shape its
+  internal payload is built around.
+- **Codex CLI** — `~/.codex/hooks.json`, wired if `codex` is on `$PATH`.
+  Codex's `PreToolUse`/`SessionStart` hooks use Claude's exact
+  request/response shape (confirmed against OpenAI's own docs), so
+  `guard`/`health` run unmodified here too. Codex's hooks are opt-in
+  though: `cerberus init` also sets `[features] codex_hooks = true` in
+  `~/.codex/config.toml`, since hooks are documented to be silent no-ops
+  without it.
+- **Cursor** — `~/.cursor/hooks.json`, wired if a `~/.cursor` directory
+  exists. `beforeShellExecution`/`beforeMCPExecution` send a real payload
+  shape and expect a real response vocabulary (`permission`, not
+  `permissionDecision`), so `guard` translates both directions through
+  `src/harness/cursor.rs`, dispatched off the payload's own
+  `hook_event_name`, no `--harness` flag needed. Cursor has no pre-write
+  file hook, only the post-hoc `afterFileEdit`, so this covers Bash and
+  MCP calls only; Write/Edit/NotebookEdit aren't guardable there yet.
+- **Hermes Agent** — `~/.hermes/plugins/cerberus/`, wired if `hermes` is
+  on `$PATH`. Hermes's best-documented integration point is an in-process
+  Python `pre_tool_call` callback rather than a subprocess given JSON on
+  stdin, so `cerberus init` writes a small Python plugin
   ([`harness-templates/hermes/`](harness-templates/hermes/)) that shells
-  out to the real `cerberus guard` binary and translates both directions.
-  Hermes's registry has around 86 tools with no per-tool matcher of its
-  own, so the plugin carries an allowlist mapping the handful cerberus
-  guards (`terminal`, `write_file`, `patch`) to their canonical
-  `Bash`/`Write`/`Edit` names — confirmed from Hermes's own tools
-  reference, deliberately not including tools like `process` whose
-  argument shape isn't confirmed to be a real shell command.
-  `cerberus guard`/`cerberus health` need no Hermes-specific code at all —
-  the whole adapter lives in that plugin. Its manifest is a best effort
-  against Hermes's documented plugin-discovery conventions, not verified
-  against the real `hermes-agent` binary; `cerberus init` says as much and
-  points at `hermes doctor` to confirm.
-- **opencode** — `~/.config/opencode/plugins/cerberus-guard.ts`. Like
-  Hermes, opencode plugins run in-process rather than as a subprocess
-  given JSON on stdin — here it's an in-process TypeScript hook
-  (`tool.execute.before`) that shells out to `cerberus guard` via Bun's
-  `$` shell. Unlike the other three, opencode has **no per-tool matcher of
-  its own** — the hook fires for every tool call — so the plugin itself
-  carries an allowlist (`bash`/`edit`/`write`/`webfetch`) doing the job
-  `GUARD_MATCHER` does elsewhere, keeping cerberus off the hot read path.
-  opencode's own tool-arg field names are camelCase (`filePath`); the
-  plugin remaps them to the snake_case shape (`file_path`) every existing
-  rule already expects. Verified end-to-end against the real `cerberus`
-  binary via Bun (a synthetic `edit` on a Claude `settings.json` correctly
-  triggers SANDBOX-003), though the plugin API details themselves are
-  cerberus's best effort against opencode's docs, not exhaustively
-  confirmed for every built-in tool's argument shape.
+  out to the real `cerberus guard` binary instead. It allowlists the
+  handful of Hermes's ~86 tools cerberus actually guards (`terminal`,
+  `write_file`, `patch`), mapped to their `Bash`/`Write`/`Edit` names. Its
+  manifest follows Hermes's documented plugin-discovery format but hasn't
+  been checked against the real binary; `cerberus init` says so and
+  points at `hermes doctor`.
+- **opencode** — `~/.config/opencode/plugins/cerberus-guard.ts`, wired if
+  `opencode` is on `$PATH`. Same problem as Hermes, same fix: an
+  in-process `tool.execute.before` hook rather than a subprocess
+  contract, so a plugin shells out to `cerberus guard` via Bun's `$`.
+  opencode has no per-tool matcher at all, so the plugin allowlists
+  `bash`/`edit`/`write`/`webfetch` itself, and remaps opencode's camelCase
+  argument names (`filePath`) to the snake_case shape every rule expects.
+  Checked end to end against the real `cerberus` binary: a fake `edit` on
+  a Claude `settings.json` correctly tripped SANDBOX-003 through that
+  remap.
 
 More harnesses land as `cerberus init` learns to wire them; see
 `CHANGELOG.md` for what's landed.
@@ -158,7 +150,7 @@ re-run:
   are silent no-ops without it), preserving every other key already there
 - wires `cerberus guard` into `~/.cursor/hooks.json`'s
   `beforeShellExecution` and `beforeMCPExecution` events if a `~/.cursor`
-  directory exists — Cursor's own hooks are additive across scope layers,
+  directory exists. Cursor's own hooks are additive across scope layers,
   so this only ever adds cerberus's entry, never touching anyone else's
 - writes the shipped [`harness-templates/hermes/`](harness-templates/hermes/)
   plugin into `~/.hermes/plugins/cerberus/` if `hermes` is on `$PATH`,
