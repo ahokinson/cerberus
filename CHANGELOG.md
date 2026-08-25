@@ -127,6 +127,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **`cerberus init` no longer wires Claude Code unconditionally.** It now
+  checks `command_exists("claude")` first, matching the detection gate
+  Codex/Hermes/opencode already use, and skips `settings.json` (with a
+  message, not an error) when Claude Code isn't on `$PATH`. It previously
+  wrote `~/.claude/settings.json` regardless of whether Claude Code was
+  present, the one harness not already following its own rule.
 - **`cerberus init` no longer claims a hook slot in `settings.json`.** It
   previously located its entry by matcher string and replaced that entry's
   hooks wholesale, which would have silently deleted an unrelated hook the

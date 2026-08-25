@@ -255,7 +255,10 @@ fn yes_no(b: bool) -> &'static str {
 
 /// Bootstraps everything cerberus needs: writes the rule scripts, seeds a
 /// default `config.toml`, ensures the cupcake stub project exists, and
-/// wires `cerberus guard`/`cerberus health` into `~/.claude/settings.json`.
+/// wires `cerberus guard`/`cerberus health` into whichever harnesses are
+/// actually present (Claude Code, Codex CLI, Cursor, Hermes, opencode) —
+/// each behind its own detection check, so running `init` on a machine
+/// without a given harness installed doesn't create files for it.
 ///
 /// Prints a summary per artifact as it goes, then one per head (see
 /// [`crate::head::Head`]), so the three-heads structure is visible at setup
@@ -391,23 +394,28 @@ pub fn run(paths: &Paths) -> i32 {
         }
     };
 
-    match settings::install_hooks(&paths.claude_settings_json()) {
-        Ok(report) => {
-            if report.pretooluse_changed {
-                println!("settings.json: `cerberus guard` now runs first on PreToolUse");
-            } else {
-                println!("settings.json: PreToolUse entry already up to date");
+    let claude_on_path = command_exists("claude");
+    if claude_on_path {
+        match settings::install_hooks(&paths.claude_settings_json()) {
+            Ok(report) => {
+                if report.pretooluse_changed {
+                    println!("settings.json: `cerberus guard` now runs first on PreToolUse");
+                } else {
+                    println!("settings.json: PreToolUse entry already up to date");
+                }
+                if report.sessionstart_changed {
+                    println!("settings.json: `cerberus health` now runs first on SessionStart");
+                } else {
+                    println!("settings.json: SessionStart entry already up to date");
+                }
             }
-            if report.sessionstart_changed {
-                println!("settings.json: `cerberus health` now runs first on SessionStart");
-            } else {
-                println!("settings.json: SessionStart entry already up to date");
-            }
+            Err(e) => problems.push(format!(
+                "couldn't update {}: {e}",
+                paths.claude_settings_json().display()
+            )),
         }
-        Err(e) => problems.push(format!(
-            "couldn't update {}: {e}",
-            paths.claude_settings_json().display()
-        )),
+    } else {
+        println!("claude: not on PATH, skipping settings.json wiring");
     }
 
     let codex_on_path = command_exists("codex");

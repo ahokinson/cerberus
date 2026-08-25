@@ -23,7 +23,7 @@ cerberus started as a Claude Code guard, but nothing about the three heads
 is Claude-specific — only the wire format and hook wiring are, and only by
 accident of being first. Supported so far:
 
-- **Claude Code** — `~/.claude/settings.json`.
+- **Claude Code** — `~/.claude/settings.json`, wired if `claude` is on `$PATH`.
 - **Codex CLI** — `~/.codex/hooks.json`. Codex's `PreToolUse`/`SessionStart`
   hooks use the exact same request/response JSON shape as Claude Code's
   (confirmed against OpenAI's own docs), so `cerberus guard`/`cerberus
