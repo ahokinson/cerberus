@@ -75,7 +75,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   external content cerberus reads is.
 - **opencode support.** `cerberus init` writes a single TypeScript plugin
   (`harness-templates/opencode/cerberus-guard.ts`, embedded as
-  `embedded::OPENCODE_PLUGIN`) into `~/.config/opencode/plugins/` when
+  `embedded::OPENCODE_PLUGIN`) into `~/.config/opencode/plugin/` when
   `opencode` is on `$PATH`. opencode plugins run in-process rather than as
   a subprocess given JSON on stdin, so the plugin's `tool.execute.before`
   hook shells out to the real `cerberus guard` binary via Bun's `$` shell,

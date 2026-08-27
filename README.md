@@ -56,7 +56,7 @@ all:
   manifest follows Hermes's documented plugin-discovery format but hasn't
   been checked against the real binary; `cerberus init` says so and
   points at `hermes doctor`.
-- **opencode** — `~/.config/opencode/plugins/cerberus-guard.ts`, wired if
+- **opencode** — `~/.config/opencode/plugin/cerberus-guard.ts`, wired if
   `opencode` is on `$PATH`. Same problem as Hermes, same fix: an
   in-process `tool.execute.before` hook rather than a subprocess
   contract, so a plugin shells out to `cerberus guard` via Bun's `$`.
@@ -157,7 +157,7 @@ re-run:
   always refreshed
 - writes the shipped
   [`harness-templates/opencode/cerberus-guard.ts`](harness-templates/opencode/)
-  plugin into `~/.config/opencode/plugins/` if `opencode` is on `$PATH`,
+  plugin into `~/.config/opencode/plugin/` if `opencode` is on `$PATH`,
   always refreshed
 
 It finishes with a per-head summary of what's ready: tirith on `$PATH` and

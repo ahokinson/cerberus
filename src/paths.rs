@@ -195,8 +195,14 @@ impl Paths {
     /// merge into: opencode plugins are auto-loaded in-process
     /// TypeScript/JavaScript, not a subprocess/stdin contract. See
     /// `init::write_opencode_plugin`.
+    ///
+    /// `plugin`, singular, and under `config_home` rather than a hardcoded
+    /// dot-config path: that is the directory a real opencode install reads
+    /// (verified against 1.18.9). A plural name is silently never loaded,
+    /// which would leave the guard looking installed while nothing it wrote
+    /// there ever ran.
     pub fn opencode_plugin_dir(&self) -> PathBuf {
-        self.home.join(".config/opencode/plugins")
+        self.config_home.join("opencode/plugin")
     }
 
     /// Which heads `cerberus guard` runs. See `config::enabled_heads`.
