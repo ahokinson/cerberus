@@ -9,6 +9,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **The risk head never self-healed its own overlay.** `evaluate`/`health`
+  required `tirith_overlay_policy_file().is_file()` before ever trying to
+  use or verify it — a totally missing overlay silently skipped cerberus's
+  own rules with no error, and a present-but-broken one (a symlink into a
+  read-only store path, which `tirith` refuses to read and silently falls
+  back to its own built-ins only, dropping every custom rule) looked fine
+  to that check and stayed broken forever. Both now self-heal: `check`
+  reports tirith's own `policy_path_used`, and if it doesn't match the
+  overlay file, cerberus rewrites it from `embedded::TIRITH_POLICY` and
+  retries once. `write_tirith_overlay` itself also had to change to make
+  this safe — `fs::write` follows a symlink to its target rather than
+  replacing it, so it now removes whatever's at the path first.
 - **`git-safety` judged the wrong repository.** The rule took the working
   directory straight from the hook payload's `cwd`, ignoring `git -C <dir>`
   and any `cd` earlier on the command line, so CONTEXT-001/002 inspected

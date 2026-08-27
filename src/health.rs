@@ -139,12 +139,6 @@ fn collect_problems(paths: &Paths) -> Vec<String> {
     if enabled.contains(&Head::Risk) {
         if !command_exists("tirith") {
             problems.push(format!("{}: tirith not on PATH", label(Head::Risk)));
-        } else if !paths.tirith_overlay_policy_file().is_file() {
-            problems.push(format!(
-                "{}: tirith overlay policy missing ({}), run `cerberus init`",
-                label(Head::Risk),
-                paths.tirith_overlay_policy_file().display()
-            ));
         } else if !tirith_overlay_canary_blocked(paths) {
             problems.push(format!(
                 "{}: tirith overlay did not block a known-dangerous command \

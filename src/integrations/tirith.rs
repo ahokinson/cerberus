@@ -21,6 +21,7 @@ struct Finding {
 struct CheckOutput {
     #[serde(default)]
     findings: Vec<Finding>,
+    policy_path_used: Option<String>,
 }
 
 /// True if `cwd` (walking up to a `.git` boundary, mirroring tirith's own
@@ -61,7 +62,7 @@ fn has_repo_policy(cwd: &Path) -> bool {
 /// this specific subprocess call only — never the user's own shell or
 /// environment — so cerberus's overlay policy never leaks outside the one
 /// `tirith check` invocation it's meant for.
-fn check(cmd: &str, policy_root_override: Option<&Path>) -> (bool, Vec<Finding>) {
+fn check(cmd: &str, policy_root_override: Option<&Path>) -> (bool, Vec<Finding>, Option<String>) {
     let mut command = Command::new("tirith");
     command.args(["check", "--non-interactive", "--format", "json", "--", cmd]);
     if let Some(root) = policy_root_override {
@@ -72,16 +73,36 @@ fn check(cmd: &str, policy_root_override: Option<&Path>) -> (bool, Vec<Finding>)
         .stderr(Stdio::null())
         .output();
     let Ok(output) = output else {
-        return (false, Vec::new());
+        return (false, Vec::new(), None);
     };
+    let parsed = serde_json::from_slice::<CheckOutput>(&output.stdout).unwrap_or_default();
     let denied = output.status.code() == Some(1);
     if !denied {
-        return (false, Vec::new());
+        return (false, Vec::new(), parsed.policy_path_used);
     }
-    let findings = serde_json::from_slice::<CheckOutput>(&output.stdout)
-        .map(|o| o.findings)
-        .unwrap_or_default();
-    (true, findings)
+    (true, parsed.findings, parsed.policy_path_used)
+}
+
+/// Runs `check` against `root` and, if tirith's own report shows the
+/// override didn't actually apply (`policy_path_used` isn't
+/// `tirith_overlay_policy_file` — tirith reports `NotRegularFile` for a
+/// policy file that's a symlink, e.g. one deployed via a nix-store
+/// symlink, and silently falls back to "fail-closed", its own built-ins
+/// only, dropping every custom rule with no error at guard time),
+/// self-heals by rewriting the overlay from cerberus's own embedded copy
+/// and retries once. Still not applied after that just returns what
+/// `check` gave — this must never become a new way to fail closed.
+fn check_with_overlay(cmd: &str, paths: &Paths, root: &Path) -> (bool, Vec<Finding>) {
+    let (denied, findings, policy_path_used) = check(cmd, Some(root));
+    let overlay_file = paths.tirith_overlay_policy_file();
+    if policy_path_used.as_deref() == Some(overlay_file.to_string_lossy().as_ref()) {
+        return (denied, findings);
+    }
+    if crate::init::write_tirith_overlay(paths).is_err() {
+        return (denied, findings);
+    }
+    let (denied, findings, _) = check(cmd, Some(root));
+    (denied, findings)
 }
 
 fn format_finding(finding: &Finding) -> String {
@@ -122,21 +143,24 @@ fn build_reason(findings: &[Finding]) -> String {
 /// [`bash_command`] for why the tool is checked by name rather than by
 /// whether a `command` field happens to be present.
 ///
-/// Applies cerberus's own overlay policy (`paths.tirith_overlay_policy_file`)
-/// by pointing `TIRITH_POLICY_ROOT` at it, but only when `cwd` has no
-/// `.tirith/policy.yaml` of its own — see [`has_repo_policy`]. A repo or
-/// team's real tirith policy always wins; cerberus never overrides it.
+/// Applies cerberus's own overlay policy (`paths.tirith_overlay_policy_file`,
+/// self-healed from `embedded::TIRITH_POLICY` if missing or unreadable — see
+/// [`check_with_overlay`]) by pointing `TIRITH_POLICY_ROOT` at it, but only
+/// when `cwd` has no `.tirith/policy.yaml` of its own — see
+/// [`has_repo_policy`]. A repo or team's real tirith policy always wins;
+/// cerberus never overrides it.
 pub fn evaluate(paths: &Paths, cwd: &Path, input: &Value) -> Option<String> {
     if !command_exists("tirith") {
         return None;
     }
     let cmd = bash_command(input)?;
 
-    let overlay = paths.tirith_overlay_policy_file();
-    let use_overlay = overlay.is_file() && !has_repo_policy(cwd);
-    let override_root = use_overlay.then(|| paths.tirith_overlay_root());
-
-    let (denied, findings) = check(cmd, override_root.as_deref());
+    let (denied, findings) = if has_repo_policy(cwd) {
+        let (denied, findings, _) = check(cmd, None);
+        (denied, findings)
+    } else {
+        check_with_overlay(cmd, paths, &paths.tirith_overlay_root())
+    };
     if !denied {
         return None;
     }
@@ -150,7 +174,7 @@ pub fn evaluate(paths: &Paths, cwd: &Path, input: &Value) -> Option<String> {
 /// specifically to cerberus's own `policies/tirith/policy.yaml` being
 /// present, valid, and live — not just that tirith itself is installed.
 pub(crate) fn overlay_blocks(paths: &Paths, cmd: &str) -> bool {
-    check(cmd, Some(&paths.tirith_overlay_root())).0
+    check_with_overlay(cmd, paths, &paths.tirith_overlay_root()).0
 }
 
 #[cfg(test)]
@@ -204,6 +228,96 @@ mod tests {
         assert!(status.success(), "tirith rule validate failed for {path:?}");
     }
 
+    fn scratch_paths(name: &str) -> Paths {
+        let root = tempdir(name);
+        Paths {
+            state_home: root.join("state"),
+            data_home: root.join("data"),
+            config_home: root.join("config"),
+            cache_home: root.join("cache"),
+            home: root.join("home"),
+        }
+    }
+
+    /// Reproduces the real outage: a deployment that symlinks the overlay
+    /// into some other location (a nix-store path, in production) instead
+    /// of writing a regular file there. tirith refuses to read it
+    /// ("NotRegularFile") and reports `policy_path_used: "fail-closed"`,
+    /// silently dropping every custom rule — `check_with_overlay` has to
+    /// notice that and self-heal, not just check `overlay.is_file()`
+    /// (which a symlink to a real file still satisfies).
+    #[test]
+    fn check_with_overlay_self_heals_a_symlinked_overlay() {
+        if !command_exists("tirith") {
+            eprintln!("skipping: tirith not on PATH");
+            return;
+        }
+        let paths = scratch_paths("self-heal-symlink");
+        let elsewhere = overlay_root_with_shipped_policy();
+
+        let overlay_file = paths.tirith_overlay_policy_file();
+        let target = elsewhere.join(".tirith/policy.yaml");
+        fs::create_dir_all(overlay_file.parent().unwrap()).unwrap();
+        #[cfg(unix)]
+        {
+            // Read-only target, matching production: a symlink into a nix
+            // store path. Proves self-heal replaces the symlink itself
+            // rather than trying to write through it - fs::write follows a
+            // symlink to its target and would just fail here otherwise.
+            use std::os::unix::fs::PermissionsExt;
+            fs::set_permissions(&target, fs::Permissions::from_mode(0o444)).unwrap();
+            std::os::unix::fs::symlink(&target, &overlay_file).unwrap();
+        }
+
+        let (denied, findings) = check_with_overlay(
+            "cargo uninstall cerberus",
+            &paths,
+            &paths.tirith_overlay_root(),
+        );
+        assert!(
+            denied,
+            "self-heal should have rewritten the overlay and retried"
+        );
+        assert!(
+            findings.iter().any(|f| f.title.as_deref()
+                == Some("Removing or uninstalling the guard's own tooling/config")),
+            "expected a guard-self-tamper finding after self-heal, got: {}",
+            build_reason(&findings)
+        );
+        assert!(
+            !overlay_file.is_symlink(),
+            "self-heal should have replaced the symlink with a real file"
+        );
+
+        fs::remove_dir_all(&elsewhere).ok();
+    }
+
+    /// A totally missing overlay (never provisioned at all, not just
+    /// broken) must self-heal the same way — `evaluate`/`overlay_blocks`
+    /// used to require `overlay.is_file()` before ever trying, which meant
+    /// a missing file silently skipped cerberus's own rules forever with
+    /// no error and no repair.
+    #[test]
+    fn check_with_overlay_self_heals_a_missing_overlay() {
+        if !command_exists("tirith") {
+            eprintln!("skipping: tirith not on PATH");
+            return;
+        }
+        let paths = scratch_paths("self-heal-missing");
+        assert!(!paths.tirith_overlay_policy_file().exists());
+
+        let (denied, _) = check_with_overlay(
+            "cargo uninstall cerberus",
+            &paths,
+            &paths.tirith_overlay_root(),
+        );
+        assert!(
+            denied,
+            "self-heal should have written the overlay from scratch"
+        );
+        assert!(paths.tirith_overlay_policy_file().is_file());
+    }
+
     /// The one shipped custom rule fires on the input it's meant to catch
     /// and stays silent on a benign counterpart — exercised through
     /// [`check`], the exact function `evaluate`/`overlay_blocks` call in
@@ -224,7 +338,7 @@ mod tests {
         }
         let root = overlay_root_with_shipped_policy();
 
-        let (denied, findings) = check("rm -rf /home/x/.config/cerberus", Some(&root));
+        let (denied, findings, _) = check("rm -rf /home/x/.config/cerberus", Some(&root));
         assert!(denied, "expected cerberus-guard-self-tamper to fire");
         assert!(
             findings.iter().any(|f| f.title.as_deref()
@@ -233,10 +347,10 @@ mod tests {
             build_reason(&findings)
         );
 
-        let (denied, _) = check("cargo uninstall cerberus", Some(&root));
+        let (denied, _, _) = check("cargo uninstall cerberus", Some(&root));
         assert!(denied, "expected the uninstall branch to fire too");
 
-        let (denied, _) = check("rm -rf ./build", Some(&root));
+        let (denied, _, _) = check("rm -rf ./build", Some(&root));
         assert!(!denied, "expected an unrelated rm -rf to stay silent");
 
         fs::remove_dir_all(&root).ok();

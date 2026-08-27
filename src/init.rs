@@ -42,10 +42,18 @@ fn write_cupcake_policies(dir: &Path) -> io::Result<usize> {
 /// versioned content, same as the rule scripts and cupcake policies. Pure
 /// local file I/O — no `tirith` binary needed to write it, only to enforce
 /// it later.
-fn write_tirith_overlay(paths: &Paths) -> io::Result<()> {
+pub(crate) fn write_tirith_overlay(paths: &Paths) -> io::Result<()> {
     let file = paths.tirith_overlay_policy_file();
     if let Some(parent) = file.parent() {
         fs::create_dir_all(parent)?;
+    }
+    // Remove whatever's there first rather than writing through it: fs::write
+    // follows a symlink to its target, so a symlink into a read-only store
+    // path (a broken deploy) would fail there instead of being replaced,
+    // leaving the symlink itself in place. symlink_metadata sees the
+    // symlink entry itself, unlike metadata, which would follow it too.
+    if file.symlink_metadata().is_ok() {
+        fs::remove_file(&file)?;
     }
     fs::write(&file, embedded::TIRITH_POLICY)
 }
