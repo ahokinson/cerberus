@@ -1,3 +1,4 @@
+mod audit;
 mod config;
 mod embedded;
 mod gate;
@@ -15,8 +16,9 @@ mod settings;
 mod sources;
 mod violations;
 
-use clap::{Parser, Subcommand};
+use clap::{Parser, Subcommand, ValueEnum};
 use paths::Paths;
+use std::path::PathBuf;
 
 /// A three-headed guard for Claude Code's tool calls
 ///
@@ -74,6 +76,15 @@ enum Command {
         #[command(subcommand)]
         action: SourceCommand,
     },
+    /// Inspect the structured audit log (off by default; see config.toml)
+    ///
+    /// Once `[audit] enabled = true`, every deny/ask decision is recorded
+    /// to ${XDG_STATE_HOME:-~/.local/state}/guard/audit.jsonl. These
+    /// subcommands read that log; they don't change whether it's kept.
+    Audit {
+        #[command(subcommand)]
+        action: AuditCommand,
+    },
 }
 
 #[derive(Subcommand)]
@@ -110,6 +121,35 @@ enum SourceCommand {
     },
 }
 
+#[derive(Subcommand)]
+enum AuditCommand {
+    /// Show the most recent audit log entries
+    Tail {
+        #[arg(short = 'n', long, default_value_t = 20)]
+        lines: usize,
+    },
+    /// Summarize deny/ask decisions over a time window
+    Summary {
+        /// How far back to look, e.g. "7d", "12h", "30m"
+        #[arg(long, default_value = "7d")]
+        since: String,
+    },
+    /// Export the full audit log
+    Export {
+        #[arg(long, value_enum, default_value_t = ExportFormat::Json)]
+        format: ExportFormat,
+        /// Write to this file instead of stdout
+        #[arg(long)]
+        out: Option<PathBuf>,
+    },
+}
+
+#[derive(Clone, ValueEnum)]
+enum ExportFormat {
+    Json,
+    Csv,
+}
+
 fn main() {
     let cli = Cli::parse();
     let paths = Paths::from_env();
@@ -119,6 +159,7 @@ fn main() {
         Command::Health => health::run(&paths),
         Command::Init => std::process::exit(init::run(&paths)),
         Command::Source { action } => std::process::exit(run_source(&paths, action)),
+        Command::Audit { action } => std::process::exit(run_audit(&paths, action)),
     }
 }
 
@@ -242,6 +283,62 @@ fn run_source(paths: &Paths, action: SourceCommand) -> i32 {
                 }
             }
             exit_code
+        }
+    }
+}
+
+fn run_audit(paths: &Paths, action: AuditCommand) -> i32 {
+    match action {
+        AuditCommand::Tail { lines } => {
+            let records = audit::read_records(paths);
+            let start = records.len().saturating_sub(lines);
+            for r in &records[start..] {
+                println!(
+                    "{} [{}] {} {} — {}",
+                    r.ts,
+                    r.head,
+                    r.tool_name.as_deref().unwrap_or("?"),
+                    r.decision,
+                    r.reason.as_deref().unwrap_or("")
+                );
+            }
+            0
+        }
+        AuditCommand::Summary { since } => {
+            let Some(window) = audit::parse_duration(&since) else {
+                eprintln!(
+                    "couldn't parse --since '{since}' (expected e.g. \"7d\", \"12h\", \"30m\")"
+                );
+                return 1;
+            };
+            let cutoff = audit::now_secs().saturating_sub(window);
+            let records = audit::read_records(paths);
+            let summary = audit::summarize(&records, cutoff);
+            println!("{} blocked in the last {since}", summary.total);
+            for (head, count) in &summary.by_head {
+                println!("  head {head}: {count}");
+            }
+            for (tool, count) in &summary.by_tool {
+                println!("  tool {tool}: {count}");
+            }
+            for (rule, count) in &summary.by_rule {
+                println!("  rule {rule}: {count}");
+            }
+            0
+        }
+        AuditCommand::Export { format, out } => {
+            let records = audit::read_records(paths);
+            let text = match format {
+                ExportFormat::Json => audit::export_json(&records),
+                ExportFormat::Csv => audit::export_csv(&records),
+            };
+            match audit::write_export(&text, out.as_deref()) {
+                Ok(()) => 0,
+                Err(e) => {
+                    eprintln!("couldn't write export: {e}");
+                    1
+                }
+            }
         }
     }
 }

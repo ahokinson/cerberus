@@ -23,6 +23,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   syntax/compile gate, not a semantic one — a deliberately malicious but
   syntactically valid policy (an always-allow rule, say) still parses
   cleanly; see SECURITY.md.
+- **Structured audit log.** `[audit] enabled = true` in `config.toml` (off
+  by default — see SECURITY.md) records every deny/ask decision as a JSON
+  line in `${XDG_STATE_HOME:-~/.local/state}/guard/audit.jsonl` via
+  `audit::record`, called from `guard::run` right beside the existing
+  `violations::record_if_denied`, reusing the same in-scope `head`/`input`/
+  `output`/`is_cursor` rather than re-deriving anything. Each record carries
+  a schema version, timestamp, session id, head, tool name, decision,
+  reason, the raw `tool_input`, and a `harness` field that can currently
+  only distinguish Cursor from everything else (Claude Code, Codex, Hermes,
+  and opencode all produce byte-identical hook JSON with no
+  harness-identifying field of their own — a real fix needs each harness
+  template to set one before invoking `cerberus guard`). `cerberus audit
+  tail/summary/export` reads it back — `summary --since <duration>` groups
+  counts by head, tool, and the `RULE-ID` extracted from the leading token
+  of each deny reason, entirely as an in-process scan (no DB, matching
+  `violations::read_counts`'s existing scale). The log rotates once at
+  10 MiB (a single `.1` generation, no background process). Off-by-default
+  and fail-closed-on-config-error, deliberately the opposite direction from
+  the heads' fail-open-to-enabled default: this is the first feature where
+  cerberus persists real command/tool-input text, which can carry inline
+  secrets, to disk.
 - **Layered policy sources.** `cerberus source add/remove/list/sync` (new
   `src/sources/` module) let a named external git repo of `rules/*.rhai`
   and/or `policies/*.rego` stack on top of a machine's personal rules —

@@ -175,6 +175,7 @@ but it doesn't error out. That matches how the heads themselves behave.
 | `cerberus gate` | standalone | the fail-closed backstop on its own, for debugging |
 | `cerberus init` | standalone | bootstraps config, rules, and hook wiring |
 | `cerberus source add/remove/list/sync` | standalone | manages layered policy sources — see [Layered policy sources](#layered-policy-sources) |
+| `cerberus audit tail/summary/export` | standalone | inspects the structured audit log — see [Audit log](#audit-log) |
 
 `guard` reads the Claude Code hook event JSON on stdin once and, on a deny
 or ask, prints the `PreToolUse` hook JSON to stdout:
@@ -385,6 +386,27 @@ root, mirroring cerberus's own layout — `policies/` may nest by category
 (subdirectories install as-is), `rules/` must stay flat — see
 [CONTRIBUTING.md](CONTRIBUTING.md) for the package-naming convention a
 source's `.rego` files should follow.
+
+## Audit log
+
+Off by default. Once `[audit] enabled = true` in `config.toml`, every
+deny/ask decision is appended as a JSON line to
+`${XDG_STATE_HOME:-$HOME/.local/state}/guard/audit.jsonl` — head, tool,
+decision, the reason, and the raw `tool_input` that triggered it. It's off
+by default specifically because that last field can contain inline secrets
+(a bearer token typed into a `curl` command, say); turning it on is a
+deliberate choice, not a default one. See [SECURITY.md](SECURITY.md).
+
+```sh
+cerberus audit tail -n 20
+cerberus audit summary --since 7d
+cerberus audit export --format csv --out blocked-this-week.csv
+```
+
+This is deliberately not telemetry — nothing here phones home. It exists so
+a team lead can point at "N blocked this week, by category" as a concrete
+case for why the guard is worth running, using a plain local log rather
+than any new server or dashboard.
 
 ## Design notes
 

@@ -84,6 +84,13 @@ risk = { disabled = false }      # general risk avoidance: tirith command-patter
 policy = { disabled = false }    # governance policy: cupcake policy evaluation
 judgement = { disabled = false } # contextual bad decisions: Rhai situational checks
 
+# Off by default: enabling this writes a structured record of every deny/ask
+# decision (including the raw command/tool-input text, which can contain
+# inline secrets) to ${XDG_STATE_HOME:-~/.local/state}/guard/audit.jsonl. See
+# `cerberus audit --help` and SECURITY.md before turning this on.
+[audit]
+enabled = false
+
 # Layered policy sources: named, independently syncable rule/policy bundles
 # (e.g. a team repo) that stack on top of the rules above. Managed via
 # `cerberus source add/remove/list/sync`, not hand-edited here.
@@ -789,7 +796,7 @@ mod tests {
     }
 
     #[test]
-    fn default_config_parses_to_all_heads_enabled_no_sources() {
+    fn default_config_parses_to_all_heads_enabled_audit_off_no_sources() {
         let paths = scratch_paths("config-default-parses");
         ensure_config_file(&paths).unwrap();
         assert_eq!(
@@ -797,6 +804,7 @@ mod tests {
             vec![Head::Risk, Head::Policy, Head::Judgement],
             "the shipped default must parse, not just fall back to all-enabled"
         );
+        assert!(!crate::config::audit_enabled(&paths));
         assert!(crate::config::sources(&paths).is_empty());
         fs::remove_dir_all(paths.config_home.parent().unwrap()).ok();
     }

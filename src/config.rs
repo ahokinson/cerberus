@@ -35,6 +35,12 @@ pub struct SourceConfig {
     pub pinned: Option<String>,
 }
 
+#[derive(Deserialize, Serialize, Default)]
+struct AuditSettings {
+    #[serde(default)]
+    enabled: bool,
+}
+
 /// The full shape of `config.toml`. Writing this back out (see
 /// [`upsert_source`]/[`remove_source`]) round-trips through a typed
 /// deserialize-mutate-reserialize cycle rather than a generic TOML-value
@@ -50,6 +56,8 @@ struct RawConfig {
     heads: HeadsTable,
     #[serde(default)]
     sources: Vec<SourceConfig>,
+    #[serde(default)]
+    audit: AuditSettings,
 }
 
 fn disabled(table: &HeadsTable, head: Head) -> bool {
@@ -63,8 +71,9 @@ fn disabled(table: &HeadsTable, head: Head) -> bool {
 /// Parses `path` as a `RawConfig`, defaulting on any read or parse problem.
 /// The single read path for every setting in this file: each field's own
 /// `Default` already encodes the right fail-direction per setting — heads
-/// default to *enabled*, since a config problem must never silently turn
-/// off enforcement.
+/// default to *enabled* (a config problem must never silently turn off
+/// enforcement) while audit logging defaults to *disabled* (a config
+/// problem must never silently start persisting command text to disk).
 fn read_config(path: &Path) -> RawConfig {
     fs::read_to_string(path)
         .ok()
@@ -114,6 +123,14 @@ pub fn sources(paths: &Paths) -> Vec<SourceConfig> {
         .into_iter()
         .filter(|s| valid_source_name(&s.name))
         .collect()
+}
+
+/// Whether the structured audit log (`src/audit.rs`) is enabled. Off by
+/// default and on any config-read problem: unlike the heads, "fail open"
+/// here would mean writing more sensitive data (raw command/tool-input
+/// text) to disk than intended.
+pub fn audit_enabled(paths: &Paths) -> bool {
+    read_config(&paths.config_file()).audit.enabled
 }
 
 /// Adds `source` to `config.toml`, replacing any existing entry with the
@@ -265,6 +282,21 @@ mod tests {
             Some("[[sources]]\nname = \"../escape\"\ngit = \"git@example.com:org/repo.git\"\n"),
         );
         assert_eq!(sources(&paths), vec![]);
+    }
+
+    #[test]
+    fn audit_disabled_by_default_and_on_malformed_config() {
+        assert!(!audit_enabled(&paths_with_config("audit-missing", None)));
+        assert!(!audit_enabled(&paths_with_config(
+            "audit-malformed",
+            Some("not valid toml {{{")
+        )));
+    }
+
+    #[test]
+    fn audit_enabled_when_explicitly_set() {
+        let paths = paths_with_config("audit-on", Some("[audit]\nenabled = true\n"));
+        assert!(audit_enabled(&paths));
     }
 
     #[test]

@@ -94,6 +94,18 @@ pub fn is_deny(output: &str) -> bool {
     permission_decision(output).as_deref() == Some("deny")
 }
 
+/// Pulls `hookSpecificOutput.permissionDecisionReason` out of any head's
+/// output JSON, mirroring [`permission_decision`]. Used by the audit log
+/// (`src/audit.rs`) to record *why* a call was denied, not just that it was.
+pub fn permission_reason(output: &str) -> Option<String> {
+    serde_json::from_str::<Value>(output).ok().and_then(|v| {
+        v.get("hookSpecificOutput")?
+            .get("permissionDecisionReason")?
+            .as_str()
+            .map(String::from)
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -173,6 +185,21 @@ mod tests {
         assert_eq!(permission_decision(r#"{"hookSpecificOutput":{}}"#), None);
         assert_eq!(permission_decision("not json"), None);
         assert_eq!(permission_decision(""), None);
+    }
+
+    #[test]
+    fn permission_reason_extracts_the_reason_string() {
+        assert_eq!(
+            permission_reason(
+                r#"{"hookSpecificOutput":{"permissionDecision":"deny","permissionDecisionReason":"nope"}}"#
+            ),
+            Some("nope".to_string())
+        );
+        assert_eq!(
+            permission_reason(r#"{"hookSpecificOutput":{"permissionDecision":"deny"}}"#),
+            None
+        );
+        assert_eq!(permission_reason("not json"), None);
     }
 
     #[test]

@@ -46,6 +46,21 @@ impl Paths {
         self.state_home.join("guard").join("degraded")
     }
 
+    /// The structured audit log (opt-in, see `config::audit_enabled` and
+    /// `src/audit.rs`): one JSONL record per non-allow decision, in the same
+    /// `guard/` directory as the violation counters and degraded sentinel.
+    pub fn audit_log_file(&self) -> PathBuf {
+        self.state_home.join("guard").join("audit.jsonl")
+    }
+
+    /// The single rotated generation of [`Self::audit_log_file`]. Simple
+    /// size-based rotation, one generation: when the live file crosses the
+    /// size threshold it's renamed here (clobbering any prior one) before a
+    /// fresh file is started.
+    pub fn audit_log_rotated_file(&self) -> PathBuf {
+        self.state_home.join("guard").join("audit.jsonl.1")
+    }
+
     pub fn cupcake_stub(&self) -> PathBuf {
         self.data_home.join("cupcake-stub")
     }
