@@ -15,11 +15,16 @@ const TARGET_SUBCOMMANDS: [&str; 8] = [
     "checkout", "switch", "restore", "push", "branch", "rebase", "commit", "clean",
 ];
 
-/// One `git` invocation found in a tokenized command line: its subcommand
-/// and the args up to the next shell operator.
+/// One `git` invocation found in a tokenized command line: its subcommand,
+/// the args up to the next shell operator, and the directory it actually
+/// runs in.
 pub(super) struct GitInvocation {
     pub(super) subcommand: String,
     pub(super) args: Vec<String>,
+    /// `-C`'s value, or the target of a `cd` earlier in the same command
+    /// line, if either is present. Relative to the hook's cwd; `None` means
+    /// the invocation runs in the hook's cwd unchanged.
+    pub(super) dir: Option<String>,
 }
 
 /// Walks every `git` token, skips its global flags to find the subcommand,
@@ -33,15 +38,31 @@ pub(super) struct GitInvocation {
 pub(super) fn find_git_invocations(tokens: &[String]) -> Vec<GitInvocation> {
     let mut result = Vec::new();
     let mut index = 0;
+    // Tracks `cd <dir>` seen earlier on the same line, since it changes the
+    // directory every later invocation runs in. Reset by a shell operator
+    // that starts a new command context.
+    let mut cd_dir: Option<String> = None;
     while index < tokens.len() {
+        if tokens[index] == "cd" && index + 1 < tokens.len() {
+            let target = tokens[index + 1].as_str();
+            if !target.starts_with('-') && !OPERATORS.contains(&target) {
+                cd_dir = Some(target.to_string());
+            }
+            index += 1;
+            continue;
+        }
         if tokens[index] != "git" {
             index += 1;
             continue;
         }
+        let mut dash_c: Option<String> = None;
         let mut sub_index = index + 1;
         while sub_index < tokens.len() {
             let t = tokens[sub_index].as_str();
             if GLOBAL_FLAGS_WITH_VALUE.contains(&t) {
+                if t == "-C" && sub_index + 1 < tokens.len() {
+                    dash_c = Some(tokens[sub_index + 1].clone());
+                }
                 sub_index += 2;
             } else if t.starts_with('-') {
                 sub_index += 1;
@@ -63,7 +84,14 @@ pub(super) fn find_git_invocations(tokens: &[String]) -> Vec<GitInvocation> {
             args.push(tokens[arg_index].clone());
             arg_index += 1;
         }
-        result.push(GitInvocation { subcommand, args });
+        // -C wins over cd: it is applied by git itself, after the shell has
+        // already chdir'd.
+        let dir = dash_c.or_else(|| cd_dir.clone());
+        result.push(GitInvocation {
+            subcommand,
+            args,
+            dir,
+        });
     }
     result
 }
@@ -276,6 +304,43 @@ mod tests {
         assert_eq!(found.len(), 1);
         assert_eq!(found[0].subcommand, "checkout");
         assert_eq!(found[0].args, vec!["main"]);
+    }
+
+    #[test]
+    fn find_git_invocations_captures_dash_c_as_the_invocation_dir() {
+        let tokens = tokenize("git -C /some/path checkout main");
+        let found = find_git_invocations(&tokens);
+        assert_eq!(found[0].dir.as_deref(), Some("/some/path"));
+    }
+
+    #[test]
+    fn find_git_invocations_dir_is_none_without_dash_c_or_cd() {
+        let tokens = tokenize("git checkout main");
+        assert_eq!(find_git_invocations(&tokens)[0].dir, None);
+    }
+
+    #[test]
+    fn find_git_invocations_carries_a_leading_cd_into_the_invocation() {
+        let tokens = tokenize("cd /repo && git switch main");
+        let found = find_git_invocations(&tokens);
+        assert_eq!(found[0].dir.as_deref(), Some("/repo"));
+    }
+
+    #[test]
+    fn find_git_invocations_prefers_dash_c_over_an_earlier_cd() {
+        // git applies -C itself, after the shell has already chdir'd.
+        let tokens = tokenize("cd /repo && git -C /other switch main");
+        let found = find_git_invocations(&tokens);
+        assert_eq!(found[0].dir.as_deref(), Some("/other"));
+    }
+
+    #[test]
+    fn find_git_invocations_gives_each_invocation_its_own_dir() {
+        let tokens = tokenize("git -C /a switch main && git -C /b clean -f");
+        let found = find_git_invocations(&tokens);
+        assert_eq!(found.len(), 2);
+        assert_eq!(found[0].dir.as_deref(), Some("/a"));
+        assert_eq!(found[1].dir.as_deref(), Some("/b"));
     }
 
     #[test]

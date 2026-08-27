@@ -116,7 +116,8 @@ ever has to express situational judgement. `src/rules/engine.rs`'s
 | `tool_paths(input)` | `rules::tool::paths`, every filesystem path the call names, normalized across `file_path`/`notebook_path`/`path` so one rule covers Write, Edit, and NotebookEdit at once |
 | `tool_url(input)` | `rules::tool::url`, the WebFetch URL (empty string stands in for `None`) |
 | `git_is_inside_work_tree(cwd)`, `git_tree_dirty(cwd)`, `git_would_discard(cwd, pathspecs)`, `git_is_ancestor(cwd, a, b)`, `git_ref_exists(cwd, refname)`, `git_ref_exists_as_branch(cwd, name)`, `git_upstream_ref(cwd)`, `git_current_branch(cwd)`, `git_clean_dry_run(cwd, args)` | `rules::git`'s subprocess helpers (empty string stands in for `None`) |
-| `git_invocations(cmd)` | `rules::git::find_git_invocations`, pre-tokenizes and returns `[{subcommand, args}]` so a script never has to walk git's global flags itself |
+| `git_invocations(cmd)` | `rules::git::find_git_invocations`, pre-tokenizes and returns `[{subcommand, args, dir}]` so a script never has to walk git's global flags itself. `dir` is `-C`'s value or an earlier `cd` target (empty for neither) |
+| `resolve_dir(base, dir)` | turns an invocation's `dir` into the directory it really runs in; returns `base` unchanged when `dir` is empty |
 | `git_parse_checkout_args(args)` | `rules::git::parse_args`, pre-classifies `checkout`/`switch`/`restore` flags into `{creating, staged, worktree, dashdash, target, pathspecs}` |
 | `kube_context()`, `terraform_workspace(cwd)`, `looks_like_production(name)` | `rules::environment` |
 

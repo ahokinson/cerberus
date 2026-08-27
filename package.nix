@@ -15,7 +15,7 @@ rustPlatform.buildRustPackage {
 
   inherit src;
 
-  cargoHash = "sha256-4xrrNu1kJI0PhnEr65QmVESdtKaAxPkO7KlshghJspo=";
+  cargoHash = "sha256-OYmckjRonW0rzt4hxGxSG71+qYrfI63DdsYD/VUDG5o=";
 
   nativeBuildInputs = [ makeWrapper ];
 
@@ -40,6 +40,11 @@ rustPlatform.buildRustPackage {
     # it - shipping them here is the path that doesn't need the imperative
     # step. A missing policy head counts as degraded, same as the rules.
     install -Dm444 -t $out/share/cerberus/policies/cupcake policies/cupcake/*.rego
+
+    # Same for the risk head's tirith overlay, applied only in repos with no
+    # .tirith/policy.yaml of their own. Missing it degrades the head, which
+    # fail-closes every guarded tool.
+    install -Dm444 -t $out/share/cerberus/policies/tirith policies/tirith/policy.yaml
 
     # cerberus resolves these three by name off PATH, and a head whose
     # binary is missing counts as degraded, which makes `cerberus gate` deny

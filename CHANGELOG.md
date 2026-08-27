@@ -7,6 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **`git-safety` judged the wrong repository.** The rule took the working
+  directory straight from the hook payload's `cwd`, ignoring `git -C <dir>`
+  and any `cd` earlier on the command line, so CONTEXT-001/002 inspected
+  whichever repo the agent happened to be sitting in rather than the one the
+  command targets. That produced false positives (a clean target repo denied
+  because the session's repo was dirty) and, more seriously, false negatives
+  (a dirty target repo allowed because the session's repo was clean).
+  `find_git_invocations` now records each invocation's `dir` and the script
+  resolves it via the new `resolve_dir` before checking, so every invocation
+  on a line is judged against the repo it actually runs in.
+
 ### Added
 
 - **`opa check` gate on layered policy sources.** `cerberus source

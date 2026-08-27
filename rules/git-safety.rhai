@@ -224,12 +224,20 @@ fn check(cmd, cwd, input) {
     if !has_trigger_word(cmd) {
         return;
     }
-    if !command_exists("git") || !git_is_inside_work_tree(cwd) {
+    if !command_exists("git") {
         return;
     }
 
+    // Each invocation is judged against the directory it actually runs in:
+    // `git -C <dir>` or a `cd` earlier on the line, not the hook's cwd. Two
+    // different repos on one command line get judged separately, and the
+    // work-tree check has to be per-invocation for the same reason.
     for invocation in git_invocations(cmd) {
-        let result = analyze(cwd, invocation.subcommand, invocation.args);
+        let dir = resolve_dir(cwd, invocation.dir);
+        if !git_is_inside_work_tree(dir) {
+            continue;
+        }
+        let result = analyze(dir, invocation.subcommand, invocation.args);
         if is_deny(result) {
             return result;
         }

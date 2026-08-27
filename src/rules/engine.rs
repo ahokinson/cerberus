@@ -57,6 +57,26 @@ pub fn build_engine() -> Engine {
         tool::url(&dynamic_to_json(&input)).unwrap_or_default()
     });
 
+    // Turns an invocation's `dir` (from `git -C` or a `cd`) into the
+    // directory the command really runs in. Empty means "no change", so the
+    // base is returned unchanged.
+    engine.register_fn("resolve_dir", |base: &str, dir: &str| -> String {
+        if dir.is_empty() {
+            return base.to_string();
+        }
+        if let Some(rest) = dir.strip_prefix("~/")
+            && let Some(home) = std::env::var_os("HOME")
+        {
+            return Path::new(&home).join(rest).to_string_lossy().into_owned();
+        }
+        let path = Path::new(dir);
+        if path.is_absolute() {
+            dir.to_string()
+        } else {
+            Path::new(base).join(path).to_string_lossy().into_owned()
+        }
+    });
+
     engine.register_fn("git_is_inside_work_tree", |cwd: &str| -> bool {
         git::is_inside_work_tree(Path::new(cwd))
     });
@@ -110,6 +130,10 @@ pub fn build_engine() -> Engine {
             .map(|invocation| {
                 let mut map = Map::new();
                 map.insert("subcommand".into(), Dynamic::from(invocation.subcommand));
+                map.insert(
+                    "dir".into(),
+                    Dynamic::from(invocation.dir.unwrap_or_default()),
+                );
                 map.insert(
                     "args".into(),
                     Dynamic::from(array_from_strings(invocation.args)),
