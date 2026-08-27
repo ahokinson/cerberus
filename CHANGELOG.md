@@ -9,6 +9,49 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **`opa check` gate on layered policy sources.** `cerberus source
+  add`/`sync --yes` now run any `.rego` a source ships through `opa check`
+  (`src/sources/mod.rs`'s `check_rego`) before installing anything. A file
+  `opa` rejects aborts the whole operation — nothing is installed and
+  `config.toml` isn't touched, versus previously surfacing only as a
+  `cupcake` error at guard time (or a silently degraded `policy` head). A
+  missing `opa` binary skips the check with a warning (`RegoCheck::Skipped`)
+  rather than blocking the source, mirroring the rest of cerberus's
+  don't-require-a-binary-you-didn't-ask-for stance. This closes the gap
+  flagged when layered policy sources first landed (see below): "no
+  uniqueness/validity check on team `.rego` package names." Note this is a
+  syntax/compile gate, not a semantic one — a deliberately malicious but
+  syntactically valid policy (an always-allow rule, say) still parses
+  cleanly; see SECURITY.md.
+- **Layered policy sources.** `cerberus source add/remove/list/sync` (new
+  `src/sources/` module) let a named external git repo of `rules/*.rhai`
+  and/or `policies/*.rego` stack on top of a machine's personal rules —
+  turning cerberus from a per-developer tool into one a team can share a
+  policy source for. `add` clones into
+  `${XDG_CACHE_HOME:-~/.cache}/cerberus/sources/<name>/`, resolves `--ref`
+  (or the remote's default branch via `origin/HEAD`) to a commit, installs
+  into `rules/sources/<name>/` and cupcake's global store under
+  `custom/cerberus/sources/<name>/` (nested inside cerberus's own reserved
+  subtree, so `guard-self-protection.rego`'s existing self-tamper regex
+  covers it for free), and pins the resolved SHA in a new `[[sources]]`
+  array-of-tables in `config.toml`. `rules::evaluate` checks each
+  configured source's directory as an additive OR-of-denials layer after
+  the top-level rules, via the same `engine::evaluate` unmodified — a
+  machine with no sources configured pays zero cost, since that function
+  already returns `None` on a missing directory. Trust model: a plain
+  `cerberus init`/`cerberus guard` never touches the network, only `source
+  sync` does, and applying an update always requires `--yes` — without it,
+  `sync` only fetches and prints the pending commit log and a diffstat
+  scoped to `rules/`/`policies/`. `config.rs` gained a typed
+  deserialize-mutate-reserialize write path (`upsert_source`/
+  `remove_source`) for `config.toml`, a deliberate departure from
+  `init::ensure_codex_hooks_enabled`'s generic-`toml::Value` patch: simpler
+  and type-safe, at the accepted cost of dropping comments and any
+  unmodeled top-level key on a write (acceptable here since, unlike Codex's
+  shared config file, this one is cerberus's own). A source `name` is
+  restricted to a safe slug before ever being joined into a path, since a
+  hand-edited `config.toml` is untrusted input the same way any other
+  external content cerberus reads is.
 - **opencode support.** `cerberus init` writes a single TypeScript plugin
   (`harness-templates/opencode/cerberus-guard.ts`, embedded as
   `embedded::OPENCODE_PLUGIN`) into `~/.config/opencode/plugins/` when

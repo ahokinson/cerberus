@@ -65,7 +65,7 @@ pub fn run(paths: &Paths) {
     let result = dispatch(&heads, |head| match head {
         Head::Risk => tirith::evaluate(paths, &cwd, &input),
         Head::Policy => cupcake::evaluate(&paths.cupcake_stub(), &raw_for_policy),
-        Head::Judgement => rules::evaluate(&paths.rule_scripts_dir(), &input, &cwd),
+        Head::Judgement => rules::evaluate(paths, &input, &cwd),
     });
 
     if let Some((head, output)) = result {

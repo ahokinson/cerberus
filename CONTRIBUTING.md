@@ -249,6 +249,43 @@ Validate syntax with `tirith rule validate --path policies/tirith/policy.yaml`,
 then confirm it actually enforces per the tiering trap above before
 committing.
 
+## Writing a policy source repo
+
+`cerberus source add <name> <git-url>` (see `src/sources/`) installs an
+*external* repo's rules/policies as an additive layer, separate from
+cerberus's own shipped content above. There's no manifest format: a source
+repo just needs `rules/*.rhai` and/or `policies/*.rego` at its root. The
+two halves differ in one way: `policies/` may nest (`policies/cloud/
+destructive.rego` installs with its subdirectory preserved, so two
+categories can each carry a `destructive.rego`), while `rules/` must stay
+flat — the rhai loader reads one directory level, so a nested script would
+install but never run, and `add`/`sync` reject that layout loudly rather
+than accept silently-dead rules.
+
+A source's `.rhai` scripts follow the exact same `check(cmd, cwd, input)`
+contract as [Adding a judgement rule](#adding-a-judgement-rule) above — no
+special casing, since `rules::evaluate` runs a source's directory through
+the same `engine::evaluate` the top-level rules use. A source's `.rego`
+files should package themselves under
+`cupcake.global.policies.cerberus.sources.<source-name>.<rule-name>` by
+convention (not enforced by cerberus, but expected by teams writing one):
+this nests inside cerberus's own reserved `custom/cerberus/` subtree, which
+is what lets `guard-self-protection.rego`'s existing self-tamper check cover
+source content for free, and keeps two different sources' policies from
+colliding with each other.
+
+`add`/`sync` pin a resolved commit SHA rather than tracking a branch
+live — see [Layered policy sources](README.md#layered-policy-sources) in
+the README for the trust model this is protecting. They also run any
+fetched `.rego` through `opa check` (`src/sources/mod.rs`'s `check_rego`)
+before installing anything, the same syntax-check `opa check
+policies/cupcake/<file>.rego` above gives cerberus's own shipped policies —
+a source repo gets no less scrutiny than this one does, just automated
+instead of a pre-commit habit. A file `opa` rejects aborts the whole
+`add`/`sync` with nothing installed; a missing `opa` binary skips the check
+with a warning rather than blocking the source, since cerberus doesn't
+require `opa` merely to accept a source, only to enforce the `policy` head.
+
 ## Testing policy and risk content
 
 `src/integrations/cupcake.rs` and `src/integrations/tirith.rs` each carry

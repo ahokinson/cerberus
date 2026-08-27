@@ -83,6 +83,14 @@ const DEFAULT_CONFIG_TOML: &str = "\
 risk = { disabled = false }      # general risk avoidance: tirith command-pattern scanning
 policy = { disabled = false }    # governance policy: cupcake policy evaluation
 judgement = { disabled = false } # contextual bad decisions: Rhai situational checks
+
+# Layered policy sources: named, independently syncable rule/policy bundles
+# (e.g. a team repo) that stack on top of the rules above. Managed via
+# `cerberus source add/remove/list/sync`, not hand-edited here.
+# [[sources]]
+# name = \"team\"
+# git = \"git@example.com:myorg/cerberus-policies.git\"
+# ref = \"main\"
 ";
 
 /// Writes the default `config.toml` if `paths.config_file()` doesn't exist
@@ -763,6 +771,7 @@ mod tests {
             state_home: root.join("state"),
             data_home: root.join("data"),
             config_home: root.join("config"),
+            cache_home: root.join("cache"),
             home: root.join("home"),
         }
     }
@@ -776,6 +785,19 @@ mod tests {
             fs::read_to_string(paths.config_file()).unwrap(),
             DEFAULT_CONFIG_TOML
         );
+        fs::remove_dir_all(paths.config_home.parent().unwrap()).ok();
+    }
+
+    #[test]
+    fn default_config_parses_to_all_heads_enabled_no_sources() {
+        let paths = scratch_paths("config-default-parses");
+        ensure_config_file(&paths).unwrap();
+        assert_eq!(
+            crate::config::enabled_heads(&paths),
+            vec![Head::Risk, Head::Policy, Head::Judgement],
+            "the shipped default must parse, not just fall back to all-enabled"
+        );
+        assert!(crate::config::sources(&paths).is_empty());
         fs::remove_dir_all(paths.config_home.parent().unwrap()).ok();
     }
 

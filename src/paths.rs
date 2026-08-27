@@ -8,6 +8,7 @@ pub struct Paths {
     pub state_home: PathBuf,
     pub data_home: PathBuf,
     pub config_home: PathBuf,
+    pub cache_home: PathBuf,
     pub home: PathBuf,
 }
 
@@ -23,10 +24,14 @@ impl Paths {
         let config_home = env::var("XDG_CONFIG_HOME")
             .map(PathBuf::from)
             .unwrap_or_else(|_| home.join(".config"));
+        let cache_home = env::var("XDG_CACHE_HOME")
+            .map(PathBuf::from)
+            .unwrap_or_else(|_| home.join(".cache"));
         Self {
             state_home,
             data_home,
             config_home,
+            cache_home,
             home,
         }
     }
@@ -98,6 +103,35 @@ impl Paths {
     /// rule doesn't need a rebuild. See `rules::engine`.
     pub fn rule_scripts_dir(&self) -> PathBuf {
         self.config_home.join("cerberus/rules")
+    }
+
+    /// Where a named policy `source`'s cloned git repo is cached
+    /// (`XDG_CACHE_HOME/cerberus/sources/<name>`). This is regenerable
+    /// derived data, not user config and not runtime state, so it lives
+    /// under the cache root: a corrupted or stale clone can be deleted and
+    /// re-fetched without touching anything else `source sync` manages. See
+    /// `src/sources`.
+    pub fn source_cache_dir(&self, name: &str) -> PathBuf {
+        self.cache_home.join("cerberus/sources").join(name)
+    }
+
+    /// Where a named source's `.rhai` rule scripts are installed
+    /// (a sibling of the flat top-level [`Self::rule_scripts_dir`], never
+    /// colliding with personal or shipped rules there). `rules::evaluate`
+    /// walks every configured source's directory here as an additive OR-of-
+    /// denials layer on top of the top-level rules.
+    pub fn source_rules_dir(&self, name: &str) -> PathBuf {
+        self.rule_scripts_dir().join("sources").join(name)
+    }
+
+    /// Where a named source's `.rego` policies are installed: nested under
+    /// the same reserved subtree as cerberus's own shipped policies
+    /// ([`Self::cupcake_global_custom_dir`]), so
+    /// `guard-self-protection.rego`'s existing unanchored substring match on
+    /// `custom/cerberus/` already covers anything nested further under it —
+    /// no policy change needed to protect source content from tampering.
+    pub fn cupcake_source_custom_dir(&self, name: &str) -> PathBuf {
+        self.cupcake_global_custom_dir().join("sources").join(name)
     }
 
     /// Claude Code's global settings file: where `cerberus init` wires up

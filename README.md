@@ -174,6 +174,7 @@ but it doesn't error out. That matches how the heads themselves behave.
 | `cerberus health` | `SessionStart` | checks that the enabled heads are enforcing |
 | `cerberus gate` | standalone | the fail-closed backstop on its own, for debugging |
 | `cerberus init` | standalone | bootstraps config, rules, and hook wiring |
+| `cerberus source add/remove/list/sync` | standalone | manages layered policy sources — see [Layered policy sources](#layered-policy-sources) |
 
 `guard` reads the Claude Code hook event JSON on stdin once and, on a deny
 or ask, prints the `PreToolUse` hook JSON to stdout:
@@ -345,6 +346,45 @@ Per-session deny counts are written to
 `${XDG_STATE_HOME:-$HOME/.local/state}/guard/violations-<session_id>.state`
 for [pharos](https://github.com/ahokinson/pharos)'s statusline to read,
 keyed by head name (`risk`/`policy`/`judgement`).
+
+## Layered policy sources
+
+A source is a named, independently syncable git repo of `rules/*.rhai`
+and/or `policies/*.rego` that stacks on top of a machine's personal rules —
+the mechanism for turning cerberus from a per-developer tool into a team
+one, without cerberus ever pulling anything on its own initiative:
+
+```sh
+cerberus source add team git@example.com:myorg/cerberus-policies.git
+cerberus source list
+cerberus source sync            # fetches and shows any pending update's log/diffstat
+cerberus source sync --yes      # applies it
+cerberus source remove team
+```
+
+`add` clones the repo, resolves `--ref` (or the remote's default branch) to
+a commit, validates any `.rego` it ships with `opa check` (skipped with a
+warning if `opa` isn't on `$PATH`; a validation *failure*, unlike a skip,
+aborts the whole operation — nothing is installed and `config.toml` isn't
+touched), installs its `rules/*.rhai` into
+`${XDG_CONFIG_HOME:-$HOME/.config}/cerberus/rules/sources/<name>/` and its
+`policies/*.rego` into cupcake's global store under
+`policies/claude/custom/cerberus/sources/<name>/` (nested inside cerberus's
+own reserved subtree, so `guard-self-protection.rego`'s existing self-tamper
+protection already covers it), and pins the resolved commit in
+`config.toml`. Every source's rules are checked the same way the top-level
+ones are — any source that denies, denies, alongside your own rules — but a
+plain `cerberus guard`/`cerberus init` never touches the network: **only
+`sync` does**, and applying an update always requires `--yes`, showing the
+pending commit log and a diffstat (scoped to `rules/`/`policies/`) first.
+Remote content that executes against every guarded tool call should never
+change on a machine without a human asking for it.
+
+A source repo just needs `rules/*.rhai` and/or `policies/*.rego` at its
+root, mirroring cerberus's own layout — `policies/` may nest by category
+(subdirectories install as-is), `rules/` must stay flat — see
+[CONTRIBUTING.md](CONTRIBUTING.md) for the package-naming convention a
+source's `.rego` files should follow.
 
 ## Design notes
 

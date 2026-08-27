@@ -266,6 +266,7 @@ mod tests {
             state_home: root.join("state"),
             data_home: root.join("data"),
             config_home: root.join("config"),
+            cache_home: root.join("cache"),
             home: root.join("home"),
         }
     }

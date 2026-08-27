@@ -34,6 +34,30 @@ fails it writes a sentinel, and `cerberus gate` then denies every Bash call
 until `cerberus init` repairs things. A guard that has quietly stopped
 working is treated as worse than no guard.
 
+## Layered policy sources are a trust boundary
+
+`cerberus source add`/`sync` (see README's "Layered policy sources") clones
+and runs a remote repo's `.rhai`/`.rego` content at the same trust level as
+cerberus's own shipped rules — it executes against every guarded tool call,
+the same as the content in this repo. A compromised or malicious source
+repo is a real attack surface, not a hypothetical one: it can add an
+always-allow rule, or a rule that exfiltrates data through its own logic.
+Only add a source you'd trust to the same degree as cerberus itself. `add`
+and `sync --yes` are both explicit, human-initiated actions specifically so
+that never happens silently — a plain `cerberus init`/`cerberus guard`
+never fetches anything, and `sync` without `--yes` only shows what would
+change.
+
+Before anything is installed, `.rego` content is run through `opa check`.
+This is a syntax/compile gate, not a semantic one: it catches a source repo
+that's broken or obviously malformed, and rejects the entire `add`/`sync`
+if it fails — nothing is installed, `config.toml` isn't touched. It does
+**not** catch a policy that parses cleanly but is deliberately malicious
+(an intentional always-allow rule reads as perfectly valid Rego). If `opa`
+isn't on `$PATH`, validation is skipped with a warning rather than blocking
+the operation — cerberus doesn't require `opa` merely to accept a source,
+only to enforce the `policy` head itself.
+
 ## Reporting a vulnerability
 
 Open a [security advisory](https://github.com/ahokinson/cerberus/security/advisories/new)
