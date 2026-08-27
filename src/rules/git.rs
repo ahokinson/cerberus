@@ -1,6 +1,7 @@
 use super::shell::OPERATORS;
+use crate::process::{git_cmd, git_stdout};
 use std::path::Path;
-use std::process::{Command, Stdio};
+use std::process::Stdio;
 
 const GLOBAL_FLAGS_WITH_VALUE: [&str; 6] = [
     "-C",
@@ -117,20 +118,6 @@ pub(super) fn ref_exists_as_branch(cwd: &Path, name: &str) -> bool {
     ref_exists(cwd, &format!("refs/heads/{name}"))
 }
 
-fn git_cmd(cwd: &Path, args: &[&str]) -> Command {
-    let mut cmd = Command::new("git");
-    cmd.arg("-C").arg(cwd).args(args);
-    cmd
-}
-
-pub(super) fn run_git_stdout(cwd: &Path, args: &[&str]) -> String {
-    git_cmd(cwd, args)
-        .output()
-        .ok()
-        .and_then(|o| String::from_utf8(o.stdout).ok())
-        .unwrap_or_default()
-}
-
 fn git_status_ok(cwd: &Path, args: &[&str]) -> bool {
     git_cmd(cwd, args)
         .stdout(Stdio::null())
@@ -151,7 +138,7 @@ pub(super) fn ref_exists(cwd: &Path, refname: &str) -> bool {
 /// True if there are staged or unstaged changes to tracked files. Untracked
 /// files are ignored: they carry over across a checkout or switch anyway.
 pub(super) fn tree_is_dirty(cwd: &Path) -> bool {
-    !run_git_stdout(cwd, &["status", "--porcelain", "--untracked-files=no"])
+    !git_stdout(cwd, &["status", "--porcelain", "--untracked-files=no"])
         .trim()
         .is_empty()
 }
@@ -170,7 +157,7 @@ pub(super) fn would_discard(cwd: &Path, pathspecs: &[String]) -> bool {
         args.extend(pathspecs.iter().cloned());
     }
     let arg_refs: Vec<&str> = args.iter().map(String::as_str).collect();
-    !run_git_stdout(cwd, &arg_refs).trim().is_empty()
+    !git_stdout(cwd, &arg_refs).trim().is_empty()
 }
 
 /// True if `ancestor` is an ancestor of, or equal to, `descendant`.
@@ -181,7 +168,7 @@ pub(super) fn is_ancestor(cwd: &Path, ancestor: &str, descendant: &str) -> bool 
 /// The current branch's configured upstream (e.g. "origin/main"), or `None`
 /// if there isn't one.
 pub(super) fn upstream_ref(cwd: &Path) -> Option<String> {
-    let out = run_git_stdout(
+    let out = git_stdout(
         cwd,
         &[
             "rev-parse",
@@ -200,7 +187,7 @@ pub(super) fn upstream_ref(cwd: &Path) -> Option<String> {
 
 /// The current branch name, or `None` for a detached HEAD.
 pub(super) fn current_branch(cwd: &Path) -> Option<String> {
-    let out = run_git_stdout(cwd, &["rev-parse", "--abbrev-ref", "HEAD"]);
+    let out = git_stdout(cwd, &["rev-parse", "--abbrev-ref", "HEAD"]);
     let trimmed = out.trim();
     if trimmed.is_empty() || trimmed == "HEAD" {
         None
@@ -215,7 +202,7 @@ pub(super) fn clean_dry_run(cwd: &Path, extra_args: &[String]) -> String {
     let mut args = vec!["clean".to_string(), "-n".to_string()];
     args.extend(extra_args.iter().cloned());
     let arg_refs: Vec<&str> = args.iter().map(String::as_str).collect();
-    run_git_stdout(cwd, &arg_refs)
+    git_stdout(cwd, &arg_refs)
 }
 
 #[cfg(test)]
