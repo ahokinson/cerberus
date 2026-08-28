@@ -1,3 +1,5 @@
+pub mod compose;
+
 use crate::hook::{bash_command, pretooluse_deny};
 use crate::paths::Paths;
 use crate::process::command_exists;
@@ -15,6 +17,11 @@ struct Finding {
     severity: Option<String>,
     title: Option<String>,
     description: Option<String>,
+    /// Which `custom_rules[].id` produced this finding. tirith reports every
+    /// custom-rule hit under the generic `rule_id: "custom_rule_match"`, so
+    /// this is the only field that attributes one to a specific rule — which
+    /// is what [`rules_that_never_fire`] needs.
+    custom_rule_id: Option<String>,
 }
 
 #[derive(Deserialize, Default)]
@@ -89,9 +96,14 @@ fn check(cmd: &str, policy_root_override: Option<&Path>) -> (bool, Vec<Finding>,
 /// policy file that's a symlink, e.g. one deployed via a nix-store
 /// symlink, and silently falls back to "fail-closed", its own built-ins
 /// only, dropping every custom rule with no error at guard time),
-/// self-heals by rewriting the overlay from cerberus's own embedded copy
-/// and retries once. Still not applied after that just returns what
-/// `check` gave — this must never become a new way to fail closed.
+/// self-heals by recomposing the overlay (see [`compose`]) and retries
+/// once. Still not applied after that just returns what `check` gave —
+/// this must never become a new way to fail closed.
+///
+/// Recomposing rather than rewriting a fixed blob is load-bearing: the file
+/// this repairs to must be the one `init` would write, fragments and
+/// sources included, or a self-heal would silently strip a team's injected
+/// rules for the rest of the session.
 fn check_with_overlay(cmd: &str, paths: &Paths, root: &Path) -> (bool, Vec<Finding>) {
     let (denied, findings, policy_path_used) = check(cmd, Some(root));
     let overlay_file = paths.tirith_overlay_policy_file();
@@ -144,7 +156,7 @@ fn build_reason(findings: &[Finding]) -> String {
 /// whether a `command` field happens to be present.
 ///
 /// Applies cerberus's own overlay policy (`paths.tirith_overlay_policy_file`,
-/// self-healed from `embedded::TIRITH_POLICY` if missing or unreadable — see
+/// self-healed by recomposing it if missing or unreadable — see
 /// [`check_with_overlay`]) by pointing `TIRITH_POLICY_ROOT` at it, but only
 /// when `cwd` has no `.tirith/policy.yaml` of its own — see
 /// [`has_repo_policy`]. A repo or team's real tirith policy always wins;
@@ -166,6 +178,65 @@ pub fn evaluate(paths: &Paths, cwd: &Path, input: &Value) -> Option<String> {
     }
 
     Some(pretooluse_deny(&build_reason(&findings)))
+}
+
+/// Checks that each rule in a composed policy can actually fire, and names
+/// the ones that can't.
+///
+/// This exists because of a trap that is very easy to walk into and very
+/// hard to notice: `tirith check` — what `risk` actually runs — only
+/// evaluates `custom_rules` once tirith's *own* built-in tier-1 detections
+/// have already escalated analysis past tier 1. A rule whose pattern has no
+/// overlap with tirith's ~150 built-in categories is never consulted in
+/// production, no matter the `paranoia` setting, even though
+/// `tirith rule validate` and `tirith rule test` both report it as fine.
+/// Confirmed live: cerberus's own `cerberus-guard-self-tamper` reaches
+/// tier 3 and blocks, while an otherwise-identical rule matching
+/// `brew uninstall <some tool>` stops at tier 1 and never runs.
+///
+/// Layering makes that far worse than it was. cerberus's own single rule
+/// was verified by hand once; a source repo can ship any number, and
+/// "cerberus installed your team's rules and they silently enforce nothing"
+/// is precisely the failure this codebase exists to prevent. So a rule may
+/// declare `examples_bad:` — commands it is supposed to catch — and this
+/// runs each one through the real `tirith check` against the real composed
+/// policy, reporting any rule that never fires.
+///
+/// Only rules that declare examples are checked. A rule without them isn't
+/// reported as broken, just unverified: cerberus has no way to guess a
+/// command that ought to trip it.
+pub(crate) fn rules_that_never_fire(composed_yaml: &str, scratch_root: &Path) -> Vec<String> {
+    if !command_exists("tirith") {
+        return Vec::new();
+    }
+    let policy_file = scratch_root.join(".tirith/policy.yaml");
+    if std::fs::create_dir_all(policy_file.parent().unwrap_or(scratch_root)).is_err()
+        || std::fs::write(&policy_file, composed_yaml).is_err()
+    {
+        return Vec::new();
+    }
+
+    compose::rules_with_examples(composed_yaml)
+        .into_iter()
+        .filter(|(id, examples)| {
+            !examples
+                .iter()
+                .any(|example| fires_for(id, example, scratch_root))
+        })
+        .map(|(id, _)| id)
+        .collect()
+}
+
+/// Whether `rule_id` produces a finding for `command` under the policy at
+/// `policy_root`. Deliberately goes through [`check`] — the same function
+/// `evaluate` uses in production — rather than `tirith rule test`, which
+/// bypasses tirith's tiering and would report success for exactly the rules
+/// this is trying to catch.
+fn fires_for(rule_id: &str, command: &str, policy_root: &Path) -> bool {
+    let (_, findings, _) = check(command, Some(policy_root));
+    findings
+        .iter()
+        .any(|f| f.custom_rule_id.as_deref() == Some(rule_id))
 }
 
 /// `health`'s canary for this head's shipped overlay content: forces
@@ -356,6 +427,60 @@ mod tests {
         fs::remove_dir_all(&root).ok();
     }
 
+    /// The tiering trap, pinned as a test rather than a comment: two rules
+    /// that both validate cleanly, one matching a command tirith's built-ins
+    /// already escalate and one that doesn't. Only the first can ever fire
+    /// in production, and `rules_that_never_fire` has to say so — that
+    /// distinction is invisible to `tirith rule validate` and is actively
+    /// misreported by `tirith rule test`.
+    #[test]
+    fn rules_that_never_fire_names_the_rule_that_cannot_escalate() {
+        if !command_exists("tirith") {
+            eprintln!("skipping: tirith not on PATH");
+            return;
+        }
+        let dir = tempdir("never-fire");
+        let composed = crate::integrations::tirith::compose::compose(
+            crate::embedded::TIRITH_POLICY,
+            &[compose::Layer {
+                label: "test".to_string(),
+                namespace: None,
+                yaml: "custom_rules:\n\
+                       \x20 - id: escalates\n\
+                       \x20   context: [exec]\n\
+                       \x20   pattern: '/srv/never-fire-probe'\n\
+                       \x20   severity: CRITICAL\n\
+                       \x20   action: block\n\
+                       \x20   title: Escalating rule\n\
+                       \x20   examples_bad: ['rm -rf /srv/never-fire-probe']\n\
+                       \x20 - id: stays-at-tier-one\n\
+                       \x20   context: [exec]\n\
+                       \x20   pattern: 'zzz-inert-probe'\n\
+                       \x20   severity: CRITICAL\n\
+                       \x20   action: block\n\
+                       \x20   title: Inert rule\n\
+                       \x20   examples_bad: ['echo zzz-inert-probe']\n"
+                    .to_string(),
+            }],
+        );
+
+        let never_fire = rules_that_never_fire(&composed.yaml, &dir);
+        assert!(
+            never_fire.contains(&"stays-at-tier-one".to_string()),
+            "a rule matching nothing tirith escalates on must be reported, got {never_fire:?}"
+        );
+        assert!(
+            !never_fire.contains(&"escalates".to_string()),
+            "a rule that does fire must not be reported, got {never_fire:?}"
+        );
+        assert!(
+            !never_fire.contains(&"cerberus-guard-self-tamper".to_string()),
+            "cerberus's own rule declares no examples, so it is unverifiable rather than \
+             broken and must not be reported: {never_fire:?}"
+        );
+        fs::remove_dir_all(&dir).ok();
+    }
+
     #[test]
     fn has_repo_policy_true_when_cwd_itself_has_one() {
         let dir = tempdir("cwd-has-policy");
@@ -399,6 +524,7 @@ mod tests {
             severity: severity.map(String::from),
             title: title.map(String::from),
             description: description.map(String::from),
+            custom_rule_id: None,
         }
     }
 

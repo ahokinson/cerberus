@@ -129,16 +129,26 @@ re-run:
   `${XDG_CONFIG_HOME:-$HOME/.config}/cerberus/rules/`
 - seeds a default `config.toml` if one doesn't already exist, and never
   touches an existing one
-- creates the cupcake stub project (`cupcake init --harness claude`) at
-  `${XDG_DATA_HOME:-$HOME/.local/share}/cupcake-stub/` if `cupcake` is on
-  `$PATH` and it doesn't already exist
-- bootstraps cupcake's **global** store for the `claude` harness
-  (`${XDG_CONFIG_HOME:-$HOME/.config}/cupcake/`) if it doesn't already
-  exist, and writes the shipped [`policies/cupcake/*.rego`](policies/cupcake/)
-  into its reserved `policies/claude/custom/cerberus/` subdirectory —
-  always refreshed, never touching anything else in the store
-- writes the shipped [`policies/tirith/policy.yaml`](policies/tirith/)
-  overlay to a cerberus-owned tirith policy root, always refreshed
+- creates a cupcake project (`cupcake init --harness claude`) at
+  `${XDG_DATA_HOME:-$HOME/.local/share}/cerberus/cupcake/` if `cupcake` is
+  on `$PATH` and it doesn't already exist
+- bootstraps **cerberus's own** cupcake store at
+  `${XDG_CONFIG_HOME:-$HOME/.config}/cerberus/cupcake/` if it doesn't
+  already exist, and writes the shipped
+  [`policies/cupcake/*.rego`](policies/cupcake/) into its
+  `policies/claude/cerberus/` directory — always refreshed. **cerberus never
+  reads or writes your own `~/.config/cupcake`.** Both locations are passed
+  to `cupcake eval` explicitly (`--policy-dir`, `--global-config`), so
+  nothing depends on the working directory or an inherited `XDG_CONFIG_HOME`
+- creates `${XDG_CONFIG_HOME:-$HOME/.config}/cerberus/tirith/` for your own
+  tirith rule fragments, and never writes into it
+- composes the tirith overlay — the shipped
+  [`policies/tirith/policy.yaml`](policies/tirith/) base plus your fragments
+  plus every configured source's — into a cerberus-owned tirith policy root,
+  always refreshed
+- removes the directories earlier versions created at the top level of
+  `$XDG_DATA_HOME` (`cupcake-stub/`, `cerberus-tirith-overlay/`,
+  `cupcake-global-init-home/`), reporting each by name
 - wires the hooks into `~/.claude/settings.json`, idempotently. **cerberus
   owns no hook slot.** The only hooks it will ever add, move, or remove are
   ones running `cerberus guard` or `cerberus health`; it puts each at the
@@ -161,9 +171,9 @@ re-run:
   always refreshed
 
 It finishes with a per-head summary of what's ready: tirith on `$PATH` and
-whether the overlay was written, the cupcake stub/global store and `opa`
-and how many of cerberus's own policies are installed, and the rule script
-count. Anything it couldn't do is reported and the exit code is non-zero,
+whether the overlay was written and how many rules composed into it, the
+cupcake project/store and `opa` and how many of cerberus's own policies are
+installed, and the rule script count. Anything it couldn't do is reported and the exit code is non-zero,
 but it doesn't error out. That matches how the heads themselves behave.
 
 ## Usage
@@ -282,15 +292,24 @@ scripts: git state, kubectl/terraform context, tokenizing.
 
 ### policy
 
-`policy` hands cupcake the hook payload verbatim; cupcake layers a
-**global** store (machine-wide, applies to every project on the machine) on
-top of each project's own `.cupcake/` policies. `cerberus init` bootstraps
-that global store for the `claude` harness and installs cerberus's own
-policies into a reserved `custom/cerberus/` subdirectory inside it —
-deliberately not the shared `custom/` namespace, since that's where a
-user's own onboarded policies live and cerberus must never collide with
-them. The canonical `.rego` files live in this repo's
-[`policies/cupcake/`](policies/cupcake/) directory.
+`policy` hands cupcake the hook payload verbatim, evaluated against a store
+cerberus owns outright at
+`${XDG_CONFIG_HOME:-$HOME/.config}/cerberus/cupcake/`, passed to
+`cupcake eval` via `--global-config`. cerberus's own policies live in its
+`policies/claude/cerberus/` directory there. The canonical `.rego` files
+live in this repo's [`policies/cupcake/`](policies/cupcake/) directory.
+
+The `claude/` path segment is cupcake's addressing rather than a Claude Code
+assumption: cupcake scans `policies/<harness>/` and only that, so a policy
+outside it is never evaluated. It matches the `--harness claude` cerberus
+passes deliberately, every harness's payload having been normalized into
+Claude's wire format at the edge.
+
+cerberus used to write into the user's own `~/.config/cupcake` instead,
+behind a reserved `custom/cerberus/` subdirectory that existed purely to
+avoid colliding with their onboarded policies. It owns its store now, so
+that reservation is gone — and so is any chance of cerberus disturbing a
+cupcake setup you maintain yourself.
 
 Four ship with cerberus, all payload-only governance invariants: cupcake
 never sees live git/process/settings state, so anything needing that stays
@@ -317,14 +336,50 @@ never sees live git/process/settings state, so anything needing that stays
 
 `risk` scans Bash command strings via tirith, which ships its own
 extensive built-in detections that already apply with zero configuration.
-cerberus adds a small overlay on top of those —
-[`policies/tirith/policy.yaml`](policies/tirith/policy.yaml), installed by
-`cerberus init` to a cerberus-owned tirith policy root and applied via
-`TIRITH_POLICY_ROOT` — but **only** in repos that have no
-`.tirith/policy.yaml` of their own; a repo or team's own tirith policy
-always wins over cerberus's overlay.
+cerberus adds an overlay on top of those, applied via `TIRITH_POLICY_ROOT` —
+but **only** in repos that have no `.tirith/policy.yaml` of their own; a
+repo or team's own tirith policy always wins over cerberus's overlay (and so
+does not receive it).
 
-Only one custom rule ships, not several — a hard-won constraint, not a
+That overlay is **composed**, not copied. tirith reads exactly one policy
+file and its schema has no `extends`/`import`, so natively a machine can
+have cerberus's rules or its own or a team's — never all three. `cerberus
+init` merges them:
+
+1. [`policies/tirith/policy.yaml`](policies/tirith/policy.yaml), cerberus's
+   embedded base
+2. `${XDG_CONFIG_HOME:-$HOME/.config}/cerberus/tirith/*.yaml` — your own
+   fragments, the risk head's counterpart to dropping a `.rhai` file into
+   the rules directory. No rebuild, and `init` never touches them
+3. each configured source's `tirith/*.yaml`, with rule ids prefixed by the
+   source name so two teams can both ship a `no-force-push`
+
+**A layer can tighten the posture but never loosen it.** `fail_mode`,
+`allow_bypass_env_noninteractive`, and `schema_version` come from cerberus's
+base and nowhere else — a layer setting one is reported and ignored — and
+`paranoia` merges as a maximum. A fragment that won't parse is skipped
+rather than fatal, so cerberus's own rules keep enforcing regardless.
+
+### Verifying an injected rule actually fires
+
+The tiering trap below applies to **every** layer, not just cerberus's own,
+and it is the thing most likely to bite you: a rule can validate cleanly,
+install correctly, and still never run. A rule may therefore declare
+`examples_bad:` — commands it is supposed to catch — and `cerberus source
+add`/`sync` runs each through the real `tirith check` against the real
+composed policy, warning about any rule that never fires:
+
+```
+warning: rule 'team-no-uninstalling-ripgrep' did not fire for any of its own
+examples_bad. ... It is installed, but it is not enforcing anything.
+```
+
+Rules that declare no examples aren't reported — cerberus has no way to
+guess a command that ought to trip them — so declaring one is the difference
+between a rule you've checked and a rule you're hoping about.
+
+Only one custom rule ships in cerberus's base, not several — a hard-won
+constraint, not a
 choice. `tirith check` (what `risk` actually calls) only evaluates
 `custom_rules` once tirith's own built-in tier-1 detections have already
 escalated analysis past tier 1; a pattern with no overlap in tirith's own
@@ -350,12 +405,20 @@ keyed by head name (`risk`/`policy`/`judgement`).
 
 ## Layered policy sources
 
-A source is a named, independently syncable git repo of `rules/*.rhai`
-and/or `policies/*.rego` that stacks on top of a machine's personal rules —
-the mechanism for turning cerberus from a per-developer tool into a team
-one, without cerberus ever pulling anything on its own initiative:
+A source is a named, independently syncable git repo carrying content for
+**all three heads**, stacked on top of a machine's own rules — the mechanism
+for turning cerberus from a per-developer tool into a team one, without
+cerberus ever pulling anything on its own initiative:
+
+| In the repo | Head | Installed to |
+| --- | --- | --- |
+| `rules/*.rhai` (flat) | `judgement` | `…/cerberus/rules/sources/<name>/` |
+| `policies/**/*.rego` (may nest) | `policy` | `…/cerberus/cupcake/policies/claude/cerberus/sources/<name>/` |
+| `tirith/*.yaml` (flat) | `risk` | composed into the overlay; see [risk](#risk) |
 
 ```sh
+cerberus source add ahokinson/cerberus-rules      # a GitHub owner/repo slug
+cerberus source add gh:myorg/policies --ref v1.2.0
 cerberus source add team git@example.com:myorg/cerberus-policies.git
 cerberus source list
 cerberus source sync            # fetches and shows any pending update's log/diffstat
@@ -363,27 +426,33 @@ cerberus source sync --yes      # applies it
 cerberus source remove team
 ```
 
+The one-argument form takes a GitHub `owner/repo` slug or any git URL and
+names the source after the repository; `--name` overrides that, and the
+two-argument `add <name> <git-url>` form still works.
+
+The `tirith/*.yaml` half is the reason this is worth using rather than
+wiring each tool up by hand: tirith reads exactly one policy file and has no
+`extends`/`import` of its own, so cerberus composing every source's
+fragments into that file is something you cannot do natively at all.
+
 `add` clones the repo, resolves `--ref` (or the remote's default branch) to
-a commit, validates any `.rego` it ships with `opa check` (skipped with a
-warning if `opa` isn't on `$PATH`; a validation *failure*, unlike a skip,
-aborts the whole operation — nothing is installed and `config.toml` isn't
-touched), installs its `rules/*.rhai` into
-`${XDG_CONFIG_HOME:-$HOME/.config}/cerberus/rules/sources/<name>/` and its
-`policies/*.rego` into cupcake's global store under
-`policies/claude/custom/cerberus/sources/<name>/` (nested inside cerberus's
-own reserved subtree, so `guard-self-protection.rego`'s existing self-tamper
-protection already covers it), and pins the resolved commit in
-`config.toml`. Every source's rules are checked the same way the top-level
-ones are — any source that denies, denies, alongside your own rules — but a
-plain `cerberus guard`/`cerberus init` never touches the network: **only
-`sync` does**, and applying an update always requires `--yes`, showing the
-pending commit log and a diffstat (scoped to `rules/`/`policies/`) first.
+a commit, validates what it ships — `.rego` with `opa check`, `tirith/*.yaml`
+by composing the candidate policy and running `tirith rule validate` over it
+(each skipped with a warning if its binary isn't on `$PATH`; a validation
+*failure*, unlike a skip, aborts the whole operation — nothing is installed
+and `config.toml` isn't touched) — installs all three kinds, pins the
+resolved commit in `config.toml`, and recomposes the tirith overlay. Every
+source's rules are checked the same way the top-level ones are — any source
+that denies, denies, alongside your own rules — but a plain
+`cerberus guard`/`cerberus init` never touches the network: **only `sync`
+does**, and applying an update always requires `--yes`, showing the pending
+commit log and a diffstat first.
 Remote content that executes against every guarded tool call should never
 change on a machine without a human asking for it.
 
-A source repo just needs `rules/*.rhai` and/or `policies/*.rego` at its
+A source repo just needs any of `rules/`, `policies/`, `tirith/` at its
 root, mirroring cerberus's own layout — `policies/` may nest by category
-(subdirectories install as-is), `rules/` must stay flat — see
+(subdirectories install as-is), `rules/` and `tirith/` must stay flat — see
 [CONTRIBUTING.md](CONTRIBUTING.md) for the package-naming convention a
 source's `.rego` files should follow.
 
@@ -421,8 +490,8 @@ that `tirith`, `opa`, and `cupcake` are on `$PATH`; that a synthetic
 `rm -rf /` still gets blocked by cupcake's stock builtins; that the rules
 directory exists and isn't empty, and that `sandbox-integrity.rhai` still
 denies both a synthetic `dangerouslyDisableSandbox: true` event *and* a
-synthetic `Write` to a Claude `settings.json`; that cupcake's global store
-has cerberus's own policies installed, and that a synthetic `Write` to
+synthetic `Write` to a Claude `settings.json`; that cerberus's cupcake store
+has its own policies installed, and that a synthetic `Write` to
 cerberus's rule-scripts path is still denied by `guard-self-protection.rego`
 specifically (proving cerberus's *own* policy content, not just that
 cupcake itself works); and that the tirith overlay file exists and its

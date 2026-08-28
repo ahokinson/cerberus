@@ -13,16 +13,23 @@
 # rule is deliberately structural/path-only, matching cupcake's role.
 #
 # The path match is keyed on cerberus's distinctive directory/file names
-# only (`cerberus/rules`, `cerberus/config.toml`, `cupcake-stub`,
-# `cerberus-tirith-overlay`, the global store's reserved
-# `custom/cerberus/` subdirectory), not on an assumed `~/.config/...`
-# prefix. `Paths` derives every one of these roots from
-# `XDG_CONFIG_HOME`/`XDG_DATA_HOME`, which can point anywhere — verified
-# live against a sandbox using non-dotted XDG roots, where a prefix-based
-# match silently failed to recognize its own paths. Also deliberately
-# narrower than a bare `.tirith/policy.yaml` or `.cupcake/` match: those
-# would catch a *project's own* tirith/cupcake config, which a human may
-# legitimately want the agent to edit and has nothing to do with cerberus.
+# only (`cerberus/rules`, `cerberus/config.toml`, `cerberus/tirith`,
+# `cerberus/cupcake`), not on an assumed `~/.config/...` prefix. `Paths`
+# derives every one of these roots from `XDG_CONFIG_HOME`/`XDG_DATA_HOME`,
+# which can point anywhere — verified live against a sandbox using
+# non-dotted XDG roots, where a prefix-based match silently failed to
+# recognize its own paths. Also deliberately narrower than a bare
+# `.tirith/policy.yaml` or `.cupcake/` match: those would catch a
+# *project's own* tirith/cupcake config, which a human may legitimately
+# want the agent to edit and has nothing to do with cerberus.
+#
+# `cerberus/cupcake/` covers cerberus's whole policy store, cerberus's own
+# `policies/claude/cerberus/*.rego` and every source's policies nested
+# beneath it alike, so source content is protected from tampering for free.
+# Likewise `cerberus/tirith/` covers both the composed overlay and the
+# fragments it's composed from. Each alternative is kept path-segment
+# specific rather than collapsed into a bare `cerberus/`, which would match
+# any checkout that merely happens to live in a directory of that name.
 
 # METADATA
 # scope: package
@@ -37,7 +44,7 @@ package cupcake.global.policies.cerberus.guard_self_protection
 import rego.v1
 
 guarded_path(path) if {
-	regex.match(`cerberus/rules/|cerberus/config\.toml|cupcake-stub/|cerberus-tirith-overlay/|cupcake/policies/claude/custom/cerberus/`, path)
+	regex.match(`cerberus/rules/|cerberus/config\.toml|cerberus/tirith/|cerberus/cupcake/`, path)
 }
 
 halt contains decision if {

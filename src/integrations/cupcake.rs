@@ -1,18 +1,40 @@
 use crate::hook::permission_decision;
+use crate::paths::Paths;
 use crate::process::command_exists;
 use std::io::{Read, Write};
 use std::path::Path;
 use std::process::{Command, Stdio};
 
-/// cupcake needs a project `.cupcake/` in the working directory; the real
-/// rules live in the global store and apply on top. Spawns
-/// `cupcake eval --harness claude` from the stub, feeding it the raw hook
-/// event JSON. Returns `None` on any failure (missing binary, non-zero
-/// exit, empty output), so a broken layer never blocks work.
-fn spawn_eval(stub_dir: &Path, input_json: &str) -> Option<String> {
+/// Spawns `cupcake eval` against cerberus's own project and policy store,
+/// feeding it the raw hook event JSON. Returns `None` on any failure
+/// (missing binary, non-zero exit, empty output), so a broken layer never
+/// blocks work.
+///
+/// Both locations are passed explicitly rather than inherited from the
+/// process environment. cerberus used to run this with `current_dir` set to
+/// a stub project because cupcake discovered its project from the cwd;
+/// `--policy-dir` removes that need, and `--global-config` points cupcake
+/// at cerberus's own store instead of the user's `~/.config/cupcake`.
+///
+/// Both flags were confirmed against cupcake 0.5.2 rather than taken from
+/// `--help`, which is misleading on both:
+///
+/// - `--policy-dir` wants the project root's `.cupcake` directory, not the
+///   `policies` directory inside it. cupcake derives the project root as
+///   this path's *parent* and re-joins `.cupcake/policies/<harness>`, so
+///   passing the deeper path makes it look for `.cupcake/.cupcake/policies/
+///   claude` and fail to initialize. See `Paths::cupcake_policy_dir`.
+/// - `--global-config` is described as a "file path" but must be an
+///   absolute *directory* that already exists. It's honored here by `eval`,
+///   but silently ignored by `cupcake verify`/`inspect` — so neither of
+///   those can be used to check what cerberus's store actually contains.
+fn spawn_eval(paths: &Paths, input_json: &str) -> Option<String> {
     let mut child = Command::new("cupcake")
         .args(["eval", "--harness", "claude"])
-        .current_dir(stub_dir)
+        .arg("--policy-dir")
+        .arg(paths.cupcake_policy_dir())
+        .arg("--global-config")
+        .arg(paths.cupcake_global_root())
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::null())
@@ -31,19 +53,19 @@ fn spawn_eval(stub_dir: &Path, input_json: &str) -> Option<String> {
     Some(out)
 }
 
-/// True if `stub_dir` has a real cupcake project set up for the `claude`
+/// True if `root` has a real cupcake project set up for the `claude`
 /// harness (i.e. `cupcake init --harness claude` has been run there).
 /// Shared by [`evaluate`], `health`'s problem collection, and `init`'s
 /// bootstrap check, so there's exactly one definition of "installed."
-pub fn stub_installed(stub_dir: &Path) -> bool {
-    stub_dir.join(".cupcake/policies/claude").is_dir()
+pub fn project_installed(root: &Path) -> bool {
+    root.join(".cupcake/policies/claude").is_dir()
 }
 
-/// True if `root` has a real cupcake **global** project for the `claude`
+/// True if `root` has a real cupcake **global** store for the `claude`
 /// harness (i.e. `cupcake init --global --harness claude` has been run).
-/// Mirrors [`stub_installed`]'s shape but checks the global store's layout
-/// (`policies/claude/`, no `.cupcake/` prefix) rather than the project
-/// stub's. Shared by `init`'s bootstrap check and `health`'s canary.
+/// Mirrors [`project_installed`]'s shape but checks the global store's
+/// layout (`policies/claude/`, no `.cupcake/` prefix). Shared by `init`'s
+/// bootstrap check and `health`'s canary.
 pub fn global_installed(root: &Path) -> bool {
     root.join("policies/claude").is_dir()
 }
@@ -58,17 +80,17 @@ fn wants_to_respond(output: &str) -> bool {
 
 /// The `policy` part of `guard`: policy evaluation via the `cupcake`
 /// binary. Returns cupcake's own output verbatim whenever it wants to
-/// respond (deny or ask); `None` (missing binary, stub not installed, eval
-/// failure, or an explicit/absent allow) means `guard` moves on to the next
-/// head.
-pub fn evaluate(stub_dir: &Path, raw_input: &str) -> Option<String> {
+/// respond (deny or ask); `None` (missing binary, project not installed,
+/// eval failure, or an explicit/absent allow) means `guard` moves on to the
+/// next head.
+pub fn evaluate(paths: &Paths, raw_input: &str) -> Option<String> {
     if !command_exists("cupcake") {
         return None;
     }
-    if !stub_installed(stub_dir) {
+    if !project_installed(&paths.cupcake_project_root()) {
         return None;
     }
-    let out = spawn_eval(stub_dir, raw_input)?;
+    let out = spawn_eval(paths, raw_input)?;
     if wants_to_respond(&out) {
         Some(out)
     } else {
@@ -104,14 +126,25 @@ mod tests {
         }
     }
 
-    /// End-to-end: real `cupcake init --global`, real `cupcake eval`, real
-    /// `opa`/WASM compilation, fully isolated from the developer's actual
-    /// `~/.config/cupcake` via a scratch `XDG_CONFIG_HOME` and a decoy
-    /// `HOME` (mirrors `init::ensure_cupcake_global`'s own isolation, for
-    /// the same reason: `cupcake init --global` auto-wires its own hook
-    /// into `$HOME/.claude/settings.json` otherwise). One deny event and
-    /// one clearly-benign counterpart per shipped policy, asserted against
-    /// the real `permissionDecisionReason` text rather than mocked.
+    /// End-to-end through the real [`evaluate`], not a re-implementation of
+    /// it: real `cupcake init`, real `cupcake eval`, real `opa`/WASM
+    /// compilation, one deny event and one clearly-benign counterpart per
+    /// shipped policy, asserted against the actual
+    /// `permissionDecisionReason` text rather than mocked.
+    ///
+    /// Going through `evaluate` is what makes this cover the invocation
+    /// itself — that `--policy-dir` gets the `.cupcake` directory and
+    /// `--global-config` gets cerberus's store. Those two flags replaced a
+    /// `current_dir` and an inherited `XDG_CONFIG_HOME`, and getting either
+    /// wrong fails *open* (cupcake finds no policies and allows), which no
+    /// assertion on a hand-rolled subprocess would have caught.
+    ///
+    /// Isolation is now structural rather than environmental: a scratch
+    /// `Paths` puts both the project and the policy store under a temp
+    /// directory, so the developer's real `~/.config/cupcake` is untouched
+    /// without needing to override `XDG_CONFIG_HOME` for the eval at all.
+    /// The decoy `HOME` is still needed for `init`, which auto-wires its own
+    /// hook into `$HOME/.claude/settings.json` otherwise.
     #[test]
     fn shipped_cupcake_policies_evaluate_correctly_end_to_end() {
         if !command_exists("cupcake") || !command_exists("opa") {
@@ -121,107 +154,107 @@ mod tests {
 
         let root = temp_dir().join(format!("cerberus-cupcake-e2e-test-{}", std::process::id()));
         let _ = fs::remove_dir_all(&root);
-        let xdg_config_home = root.join("config");
-        let decoy_home = root.join("decoy-home");
-        let project_dir = root.join("project");
-        fs::create_dir_all(&xdg_config_home).unwrap();
+        let paths = Paths {
+            state_home: root.join("state"),
+            data_home: root.join("data"),
+            config_home: root.join("config"),
+            cache_home: root.join("cache"),
+            home: root.join("home"),
+        };
+        let decoy_home = paths.cupcake_init_decoy_home();
         fs::create_dir_all(&decoy_home).unwrap();
-        fs::create_dir_all(&project_dir).unwrap();
+        fs::create_dir_all(paths.cupcake_project_root()).unwrap();
 
         let global_init = Command::new("cupcake")
             .args(["init", "--global", "--harness", "claude"])
             .env("HOME", &decoy_home)
-            .env("XDG_CONFIG_HOME", &xdg_config_home)
+            .env("XDG_CONFIG_HOME", paths.cupcake_init_xdg_config_home())
             .status()
             .expect("failed to run cupcake init --global");
         assert!(global_init.success(), "cupcake init --global failed");
+        assert!(
+            global_installed(&paths.cupcake_global_root()),
+            "the XDG_CONFIG_HOME redirect must land the store at {}",
+            paths.cupcake_global_root().display()
+        );
 
-        let custom_dir = xdg_config_home.join("cupcake/policies/claude/custom/cerberus");
-        fs::create_dir_all(&custom_dir).unwrap();
+        let policies_dir = paths.cupcake_policies_dir();
+        fs::create_dir_all(&policies_dir).unwrap();
         for (name, contents) in crate::embedded::CUPCAKE_POLICIES {
-            fs::write(custom_dir.join(name), contents).unwrap();
+            fs::write(policies_dir.join(name), contents).unwrap();
         }
 
         let project_init = Command::new("cupcake")
             .args(["init", "--harness", "claude"])
-            .current_dir(&project_dir)
+            .current_dir(paths.cupcake_project_root())
             .env("HOME", &decoy_home)
             .status()
             .expect("failed to run cupcake init (project)");
         assert!(project_init.success(), "cupcake init (project) failed");
 
-        let run_eval = |event: &serde_json::Value| -> String {
-            let mut child = Command::new("cupcake")
-                .args(["eval", "--harness", "claude", "--log-level", "error"])
-                .current_dir(&project_dir)
-                .env("XDG_CONFIG_HOME", &xdg_config_home)
-                .stdin(Stdio::piped())
-                .stdout(Stdio::piped())
-                .stderr(Stdio::null())
-                .spawn()
-                .expect("failed to spawn cupcake eval");
-            child
-                .stdin
-                .take()
-                .unwrap()
-                .write_all(event.to_string().as_bytes())
-                .unwrap();
-            let out = child.wait_with_output().unwrap();
-            String::from_utf8(out.stdout).unwrap()
-        };
-
         let event = |tool: &str, tool_input: serde_json::Value| {
             json!({
                 "session_id": "t",
                 "transcript_path": "/dev/null",
-                "cwd": project_dir.to_string_lossy(),
+                "cwd": "/repo",
                 "hook_event_name": "PreToolUse",
                 "tool_name": tool,
                 "tool_input": tool_input,
             })
+            .to_string()
+        };
+        let denial = |tool: &str, tool_input: serde_json::Value| -> String {
+            let out = evaluate(&paths, &event(tool, tool_input))
+                .unwrap_or_else(|| panic!("expected {tool} to be denied, got an allow"));
+            assert!(is_deny(&out), "{out}");
+            out
+        };
+        let allows = |tool: &str, tool_input: serde_json::Value| {
+            let out = evaluate(&paths, &event(tool, tool_input));
+            assert!(out.is_none(), "expected an allow, got {out:?}");
         };
 
         // CERB-POL-001: sandbox-integrity.rego
-        let out = run_eval(&event(
+        let out = denial(
             "Bash",
             json!({"command": "ls", "dangerouslyDisableSandbox": true}),
-        ));
-        assert!(
-            is_deny(&out) && out.contains("dangerouslyDisableSandbox"),
-            "{out}"
         );
-        let out = run_eval(&event("Bash", json!({"command": "ls -la"})));
-        assert!(!is_deny(&out), "expected allow, got {out}");
+        assert!(out.contains("dangerouslyDisableSandbox"), "{out}");
+        allows("Bash", json!({"command": "ls -la"}));
 
         // CERB-POL-002: webfetch-ssrf.rego
-        let out = run_eval(&event(
+        let out = denial(
             "WebFetch",
             json!({"url": "http://169.254.169.254/latest/meta-data/"}),
-        ));
-        assert!(is_deny(&out) && out.contains("SSRF"), "{out}");
-        let out = run_eval(&event("WebFetch", json!({"url": "https://example.com"})));
-        assert!(!is_deny(&out), "expected allow, got {out}");
+        );
+        assert!(out.contains("SSRF"), "{out}");
+        allows("WebFetch", json!({"url": "https://example.com"}));
 
         // CERB-POL-003: ci-trust-boundary.rego
-        let out = run_eval(&event(
+        let out = denial(
             "Write",
             json!({"file_path": "/repo/.github/workflows/ci.yml"}),
-        ));
-        assert!(is_deny(&out) && out.contains("CI/CD"), "{out}");
-        let out = run_eval(&event("Write", json!({"file_path": "/repo/src/main.rs"})));
-        assert!(!is_deny(&out), "expected allow, got {out}");
-
-        // CERB-POL-004: guard-self-protection.rego
-        let out = run_eval(&event(
-            "Write",
-            json!({"file_path": "/home/x/.config/cerberus/rules/sandbox-integrity.rhai"}),
-        ));
-        assert!(
-            is_deny(&out) && out.contains("cerberus's, tirith's, or cupcake's"),
-            "{out}"
         );
-        let out = run_eval(&event("Write", json!({"file_path": "/repo/src/lib.rs"})));
-        assert!(!is_deny(&out), "expected allow, got {out}");
+        assert!(out.contains("CI/CD"), "{out}");
+        allows("Write", json!({"file_path": "/repo/src/main.rs"}));
+
+        // CERB-POL-004: guard-self-protection.rego. The denied path is built
+        // from the scratch `Paths` rather than hardcoded, so this stays
+        // honest about what the policy's regex actually has to match.
+        let out = denial(
+            "Write",
+            json!({"file_path": paths.rule_scripts_dir().join("sandbox-integrity.rhai")}),
+        );
+        assert!(out.contains("cerberus's, tirith's, or cupcake's"), "{out}");
+        allows("Write", json!({"file_path": "/repo/src/lib.rs"}));
+
+        // The relocated store is covered too: cerberus's own policy
+        // directory has to be self-protected at its new path, not the old
+        // `custom/cerberus/` one.
+        denial(
+            "Write",
+            json!({"file_path": paths.cupcake_policies_dir().join("sandbox-integrity.rego")}),
+        );
 
         fs::remove_dir_all(&root).ok();
     }
@@ -253,7 +286,7 @@ mod tests {
             std::process::id()
         ));
         let _ = fs::remove_dir_all(&dir);
-        assert!(!stub_installed(&dir));
+        assert!(!project_installed(&dir));
     }
 
     #[test]
@@ -264,7 +297,7 @@ mod tests {
         ));
         let _ = fs::remove_dir_all(&dir);
         fs::create_dir_all(dir.join(".cupcake/policies/claude")).unwrap();
-        assert!(stub_installed(&dir));
+        assert!(project_installed(&dir));
         fs::remove_dir_all(&dir).ok();
     }
 

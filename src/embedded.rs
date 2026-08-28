@@ -19,10 +19,9 @@ pub const RULES: &[(&str, &str)] = &[
 ];
 
 /// The canonical `policy` head Rego policies, embedded the same way as
-/// `RULES` and written by `cerberus init` into the reserved
-/// `custom/cerberus/` subdirectory of cupcake's global store (see
-/// `Paths::cupcake_global_custom_dir`), never into the shared `custom/`
-/// namespace a user's own onboarded policies live in.
+/// `RULES` and written by `cerberus init` into cerberus's own cupcake
+/// store (see `Paths::cupcake_policies_dir`). cerberus never writes into
+/// the user's own `~/.config/cupcake`.
 pub const CUPCAKE_POLICIES: &[(&str, &str)] = &[
     (
         "ci-trust-boundary.rego",

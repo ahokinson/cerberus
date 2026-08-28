@@ -1,11 +1,24 @@
 # Head: risk — Purpose: general risk avoidance
 #
-# cerberus's own overlay on top of tirith's built-in detections, applied
-# only in repos that don't already have their own .tirith/policy.yaml (see
-# src/integrations/tirith.rs::has_repo_policy — a repo's own policy always
-# wins; cerberus never overrides it. Confirmed: TIRITH_POLICY_ROOT otherwise
-# takes precedence over an ambient repo policy, so this Rust-side guard is
-# load-bearing, not decorative).
+# THIS IS THE BASE LAYER, not the file tirith reads. cerberus composes it
+# with the user's own fragments (${XDG_CONFIG_HOME:-~/.config}/cerberus/
+# tirith/*.yaml) and every configured policy source's, writing the result to
+# Paths::tirith_overlay_policy_file — see src/integrations/tirith/compose.rs.
+# tirith has no layering of its own (no extends/import in its schema;
+# TIRITH_POLICY_ROOT points at exactly one file), so that composition is the
+# only way a machine gets cerberus's rules *and* its own *and* a team's.
+#
+# Only this file may set the weakening knobs below (fail_mode,
+# allow_bypass_env_noninteractive, schema_version); a layer declaring one is
+# reported and ignored, and paranoia merges as a maximum. A source repo can
+# tighten the risk head, never loosen it.
+#
+# cerberus's overlay is applied only in repos that don't already have their
+# own .tirith/policy.yaml (see src/integrations/tirith/mod.rs::has_repo_policy
+# — a repo's own policy always wins; cerberus never overrides it. Confirmed:
+# TIRITH_POLICY_ROOT otherwise takes precedence over an ambient repo policy,
+# so this Rust-side guard is load-bearing, not decorative). Note that means
+# injected rules don't reach such a repo either.
 #
 # schema_version / fail_mode / paranoia are pinned explicitly rather than
 # left to tirith's own defaults, so a future tirith version changing its
@@ -19,8 +32,10 @@
 # `action: block` only takes effect at HIGH/CRITICAL severity — MEDIUM
 # always derives to an effective `warn` regardless of the declared action.
 #
-# Only one custom rule ships, not several, for a reason discovered the hard
-# way: `tirith rule test` evaluates a named rule directly and always
+# Only one custom rule ships here, not several, for a reason discovered the
+# hard way — and the same trap applies to every rule composed on top of this
+# base, whether it comes from a personal fragment or a team's source repo:
+# `tirith rule test` evaluates a named rule directly and always
 # reports whether it fires, but that is NOT what `cerberus guard` actually
 # calls — `risk` shells out to `tirith check`, which only evaluates
 # custom_rules once tirith's OWN built-in tier-1 detections have already
@@ -38,12 +53,14 @@
 # test`/`tirith rule validate` alone are not sufficient proof it will ever
 # enforce anything. See CONTRIBUTING.md's "Adding a risk rule".
 #
-# The path match is keyed on cerberus's distinctive directory names alone
-# (`cerberus`, `cupcake-stub`, `cerberus-tirith-overlay`, `tirith`), not an
-# assumed `~/.config/...`/`~/.local/share/...` prefix: `Paths` derives every
-# one of these roots from `XDG_CONFIG_HOME`/`XDG_DATA_HOME`, which can point
-# anywhere — a prefix-based match silently missed a real `rm -rf` of
-# cerberus's own state under a non-dotted XDG root in testing.
+# The path match is keyed on the distinctive directory names alone
+# (`cerberus`, `tirith`, `cupcake`), not an assumed
+# `~/.config/...`/`~/.local/share/...` prefix: `Paths` derives every one of
+# these roots from `XDG_CONFIG_HOME`/`XDG_DATA_HOME`, which can point
+# anywhere — a prefix-based match silently missed a real recursive delete of
+# cerberus's own state under a non-dotted XDG root in testing. Everything
+# cerberus owns now lives under a single `cerberus/` directory, so the
+# former `cupcake-stub`/`cerberus-tirith-overlay` alternatives are gone.
 
 schema_version: 1
 fail_mode: open           # cerberus's heads are fail-open per head; `gate` is the fail-closed backstop, not tirith
@@ -53,7 +70,7 @@ allow_bypass_env_noninteractive: false
 custom_rules:
   - id: cerberus-guard-self-tamper
     context: [exec]
-    pattern: '(rm\s+-rf?\s+[^\n]*/(cerberus|cupcake-stub|cerberus-tirith-overlay|tirith)(/[^\s]*)?(\s|$)|\b(brew\s+uninstall|apt(-get)?\s+remove|cargo\s+uninstall|pip\s+uninstall)\s+(tirith|cupcake|cerberus)\b)'
+    pattern: '(rm\s+-rf?\s+[^\n]*/(cerberus|cupcake|tirith)(/[^\s]*)?(\s|$)|\b(brew\s+uninstall|apt(-get)?\s+remove|cargo\s+uninstall|pip\s+uninstall)\s+(tirith|cupcake|cerberus)\b)'
     severity: CRITICAL
     action: block
     title: Removing or uninstalling the guard's own tooling/config

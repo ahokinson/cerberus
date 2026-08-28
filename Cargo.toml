@@ -17,4 +17,5 @@ clap = { version = "4.6.5", features = ["derive", "wrap_help"] }
 rhai = { version = "1.25.1", features = ["serde"] }
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = { version = "1.0.151", features = ["preserve_order"] }
+serde_norway = "0.9.42"
 toml = "1.1.4"

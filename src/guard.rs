@@ -65,7 +65,7 @@ pub fn run(paths: &Paths) {
     let heads = config::enabled_heads(paths);
     let result = dispatch(&heads, |head| match head {
         Head::Risk => tirith::evaluate(paths, &cwd, &input),
-        Head::Policy => cupcake::evaluate(&paths.cupcake_stub(), &raw_for_policy),
+        Head::Policy => cupcake::evaluate(paths, &raw_for_policy),
         Head::Judgement => rules::evaluate(paths, &input, &cwd),
     });
 

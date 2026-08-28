@@ -11,8 +11,9 @@ use std::io::Write;
 
 /// End-to-end canary: feeds a known halt command (`rm -rf /`) through the
 /// real cupcake evaluation and asserts it denies. Exercises the whole path
-/// (stub, cupcake eval, opa/WASM, global store), calling [`cupcake::evaluate`]
-/// directly instead of spawning a subprocess of this same binary.
+/// (cerberus's cupcake project, cupcake eval, opa/WASM, cerberus's own
+/// policy store), calling [`cupcake::evaluate`] directly instead of
+/// spawning a subprocess of this same binary.
 fn canary_blocked(paths: &Paths) -> bool {
     let event = json!({
         "session_id": "guard-health",
@@ -24,7 +25,7 @@ fn canary_blocked(paths: &Paths) -> bool {
         "tool_input": { "command": "rm -rf /" },
     })
     .to_string();
-    cupcake::evaluate(&paths.cupcake_stub(), &event).is_some_and(|out| is_deny(&out))
+    cupcake::evaluate(paths, &event).is_some_and(|out| is_deny(&out))
 }
 
 /// Canary for the policy head's **global-store** content specifically, as
@@ -49,7 +50,7 @@ fn global_policy_canary_blocked(paths: &Paths) -> bool {
         },
     })
     .to_string();
-    cupcake::evaluate(&paths.cupcake_stub(), &event).is_some_and(|out| is_deny(&out))
+    cupcake::evaluate(paths, &event).is_some_and(|out| is_deny(&out))
 }
 
 /// Canary for the risk head's shipped overlay content
@@ -158,12 +159,12 @@ fn collect_problems(paths: &Paths) -> Vec<String> {
         if !command_exists("cupcake") {
             problems.push(format!("{}: cupcake not on PATH", label(Head::Policy)));
         } else {
-            let stub = paths.cupcake_stub();
-            if !cupcake::stub_installed(&stub) {
+            let project = paths.cupcake_project_root();
+            if !cupcake::project_installed(&project) {
                 problems.push(format!(
-                    "{}: cupcake stub project missing ({}/.cupcake), run `cerberus init`",
+                    "{}: cupcake project missing ({}/.cupcake), run `cerberus init`",
                     label(Head::Policy),
-                    stub.display()
+                    project.display()
                 ));
             } else if !canary_blocked(paths) {
                 problems.push(format!(
@@ -173,7 +174,7 @@ fn collect_problems(paths: &Paths) -> Vec<String> {
                 ));
             } else if !cupcake::global_installed(&paths.cupcake_global_root()) {
                 problems.push(format!(
-                    "{}: cupcake global store missing ({}), run `cerberus init`",
+                    "{}: cerberus's cupcake store missing ({}), run `cerberus init`",
                     label(Head::Policy),
                     paths.cupcake_global_root().display()
                 ));

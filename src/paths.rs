@@ -61,42 +61,124 @@ impl Paths {
         self.state_home.join("guard").join("audit.jsonl.1")
     }
 
-    pub fn cupcake_stub(&self) -> PathBuf {
-        self.data_home.join("cupcake-stub")
+    /// The cupcake *project* root cerberus owns. cupcake needs a project
+    /// alongside its global store, so `cerberus init` scaffolds one here
+    /// with `cupcake init --harness claude`; cerberus's own policies all
+    /// live in the global store ([`Self::cupcake_policies_dir`]), not here.
+    ///
+    /// Formerly `$XDG_DATA_HOME/cupcake-stub`, and formerly reached by
+    /// running `cupcake eval` with its `current_dir` set here, because
+    /// cupcake used to discover its project from the cwd. It takes an
+    /// explicit `--policy-dir` now (see [`Self::cupcake_policy_dir`]), so
+    /// this is just a directory cerberus owns rather than a cwd it borrows.
+    pub fn cupcake_project_root(&self) -> PathBuf {
+        self.data_home.join("cerberus/cupcake")
     }
 
-    /// cupcake's own machine-wide global config root
-    /// (`$XDG_CONFIG_HOME/cupcake`, confirmed against a real cupcake
-    /// install), where `cupcake init --global` scaffolds every harness's
-    /// policies and where they layer on top of the per-project stub above.
-    /// cerberus only ever writes beneath [`Self::cupcake_global_custom_dir`].
+    /// What `cupcake eval --policy-dir` actually wants: the project root's
+    /// `.cupcake` directory, **not** the `policies` directory inside it.
+    /// Confirmed against cupcake 0.5.2, which derives the project root as
+    /// this path's *parent* and then re-joins `.cupcake/policies/<harness>`
+    /// itself — passing the `policies` directory instead makes it look for
+    /// `.cupcake/.cupcake/policies/claude` and fail to initialize. This
+    /// matches what cupcake's own generated Claude hook passes
+    /// (`--policy-dir $CLAUDE_PROJECT_DIR/.cupcake`).
+    pub fn cupcake_policy_dir(&self) -> PathBuf {
+        self.cupcake_project_root().join(".cupcake")
+    }
+
+    /// cerberus's **own** cupcake global store, passed to `cupcake eval`
+    /// via `--global-config`. Formerly the user's own machine-wide
+    /// `$XDG_CONFIG_HOME/cupcake`, into which cerberus wrote a reserved
+    /// subdirectory; cerberus now owns this store outright and never
+    /// touches the user's cupcake install at all.
+    ///
+    /// Note `--global-config` is honored by `cupcake eval` but silently
+    /// ignored by `cupcake verify`/`inspect` (confirmed against 0.5.2), so
+    /// those two are not usable to check what cerberus's store contains.
     pub fn cupcake_global_root(&self) -> PathBuf {
-        self.config_home.join("cupcake")
+        self.config_home.join("cerberus/cupcake")
     }
 
-    /// The one subdirectory cerberus ever writes to inside cupcake's global
-    /// store. Reserved so cerberus's policies can never collide with a
-    /// user's own `custom/<category>/<name>.rego` policies (a real,
-    /// observed layout on a populated global store) — harness-scoped by
-    /// `claude/` already, further scoped to `cerberus/` within it.
-    pub fn cupcake_global_custom_dir(&self) -> PathBuf {
-        self.cupcake_global_root()
-            .join("policies/claude/custom/cerberus")
+    /// Where cerberus's shipped `.rego` policies are installed inside its
+    /// own global store.
+    ///
+    /// The `claude/` segment is cupcake's addressing, not a Claude Code
+    /// assumption: the global phase scans `policies/<harness>/` and only
+    /// that, so a policy outside it is never scanned and the head would
+    /// enforce nothing. It matches the `--harness claude` cerberus passes
+    /// deliberately, every harness's payload having been normalized into
+    /// Claude's wire format at the edge.
+    ///
+    /// There is no `custom/` segment. That existed only to reserve a
+    /// namespace inside the *user's* store, beside their own onboarded
+    /// `custom/<category>/*.rego` — a collision that cannot happen in a
+    /// store cerberus owns. Verified live: policies here are scanned,
+    /// parsed, routed, and enforcing.
+    pub fn cupcake_policies_dir(&self) -> PathBuf {
+        self.cupcake_global_root().join("policies/claude/cerberus")
     }
 
-    /// A cerberus-owned tirith policy root, analogous in spirit to
-    /// [`Self::cupcake_stub`]: not a real repo, just a fixed location
-    /// `tirith check` can be pointed at via `TIRITH_POLICY_ROOT` when the
-    /// real repo being guarded has no `.tirith/policy.yaml` of its own.
+    /// The `XDG_CONFIG_HOME` value handed to the `cupcake init --global`
+    /// subprocess. cupcake derives its global root as
+    /// `$XDG_CONFIG_HOME/cupcake`, so pointing it one level into cerberus's
+    /// own config directory is what makes the store land at
+    /// [`Self::cupcake_global_root`] instead of the user's
+    /// `~/.config/cupcake`. This is the whole mechanism by which cerberus
+    /// gets a cupcake-scaffolded (and therefore version-correct) store
+    /// without hand-rolling cupcake's `system/evaluate.rego`.
+    pub fn cupcake_init_xdg_config_home(&self) -> PathBuf {
+        self.config_home.join("cerberus")
+    }
+
+    /// A cerberus-owned tirith policy root: not a real repo, just a fixed
+    /// location `tirith check` can be pointed at via `TIRITH_POLICY_ROOT`
+    /// when the real repo being guarded has no `.tirith/policy.yaml` of its
+    /// own. Formerly `$XDG_DATA_HOME/cerberus-tirith-overlay`.
     pub fn tirith_overlay_root(&self) -> PathBuf {
-        self.data_home.join("cerberus-tirith-overlay")
+        self.data_home.join("cerberus/tirith")
     }
 
+    /// The single composed policy file tirith reads. Generated, never
+    /// hand-edited: `integrations::tirith::compose` merges cerberus's
+    /// embedded base with [`Self::tirith_fragments_dir`] and every source's
+    /// fragments into this one file, because tirith has no policy layering
+    /// of its own (no `extends`/`import` in its schema — `TIRITH_POLICY_ROOT`
+    /// points at exactly one file).
     pub fn tirith_overlay_policy_file(&self) -> PathBuf {
         self.tirith_overlay_root().join(".tirith/policy.yaml")
     }
 
-    /// A decoy `HOME` for the `cupcake init --global` subprocess only.
+    /// Where a user drops their **own** tirith policy fragments (`*.yaml`),
+    /// the risk head's counterpart to dropping a personal `.rhai` file into
+    /// [`Self::rule_scripts_dir`]. `cerberus init` creates this directory
+    /// and never writes into it or removes anything from it.
+    pub fn tirith_fragments_dir(&self) -> PathBuf {
+        self.config_home.join("cerberus/tirith")
+    }
+
+    /// Where a named source's tirith fragments are installed — a sibling of
+    /// the personal fragments above, never colliding with them, mirroring
+    /// how [`Self::source_rules_dir`] sits beside the top-level rules.
+    pub fn source_tirith_dir(&self, name: &str) -> PathBuf {
+        self.tirith_fragments_dir().join("sources").join(name)
+    }
+
+    /// The directories earlier versions of cerberus created at the top level
+    /// of `$XDG_DATA_HOME`, before everything moved under a single
+    /// `cerberus/` namespace. `cerberus init` removes these once the new
+    /// locations are in place; they are cerberus's own artifacts, so nothing
+    /// of the user's is at risk, but the removal is always reported by name
+    /// rather than done silently.
+    pub fn legacy_dirs(&self) -> Vec<PathBuf> {
+        vec![
+            self.data_home.join("cupcake-stub"),
+            self.data_home.join("cerberus-tirith-overlay"),
+            self.data_home.join("cupcake-global-init-home"),
+        ]
+    }
+
+    /// A decoy `HOME` for the `cupcake init` subprocesses only.
     /// `cupcake init --global` doesn't just scaffold the policy tree — it
     /// also tries to auto-wire its own independent `PreToolUse` hook
     /// (matcher `"*"`, running `cupcake eval` directly) into
@@ -106,11 +188,15 @@ impl Paths {
     /// `init::ensure_cupcake_global` runs the subprocess with `HOME`
     /// pointed here instead of the user's real home: the global config
     /// destination is controlled separately via `XDG_CONFIG_HOME`
-    /// (`cupcake_global_root`'s parent), so the store still lands in the
-    /// right place, but cupcake's settings.json probe finds nothing at this
-    /// decoy path and leaves the real `~/.claude/settings.json` alone.
-    pub fn cupcake_global_init_decoy_home(&self) -> PathBuf {
-        self.data_home.join("cupcake-global-init-home")
+    /// ([`Self::cupcake_init_xdg_config_home`]), so the store still lands
+    /// in the right place, but cupcake's settings.json probe finds nothing
+    /// at this decoy path and leaves the real `~/.claude/settings.json`
+    /// alone. Re-confirmed against cupcake 0.5.2: running `init --global`
+    /// with a decoy `HOME` leaves a `.claude/settings.json` behind *in the
+    /// decoy*, which is exactly the file that would otherwise have been the
+    /// user's.
+    pub fn cupcake_init_decoy_home(&self) -> PathBuf {
+        self.data_home.join("cerberus/cupcake-init-home")
     }
 
     /// Where Rhai rule scripts (`*.rhai`) are loaded from at runtime,
@@ -140,13 +226,12 @@ impl Paths {
     }
 
     /// Where a named source's `.rego` policies are installed: nested under
-    /// the same reserved subtree as cerberus's own shipped policies
-    /// ([`Self::cupcake_global_custom_dir`]), so
-    /// `guard-self-protection.rego`'s existing unanchored substring match on
-    /// `custom/cerberus/` already covers anything nested further under it —
-    /// no policy change needed to protect source content from tampering.
-    pub fn cupcake_source_custom_dir(&self, name: &str) -> PathBuf {
-        self.cupcake_global_custom_dir().join("sources").join(name)
+    /// cerberus's own policy subtree ([`Self::cupcake_policies_dir`]), so
+    /// `guard-self-protection.rego`'s match on `cerberus/cupcake/` covers
+    /// anything nested further under it — no policy change is needed to
+    /// protect source content from tampering.
+    pub fn cupcake_source_policies_dir(&self, name: &str) -> PathBuf {
+        self.cupcake_policies_dir().join("sources").join(name)
     }
 
     /// Claude Code's global settings file: where `cerberus init` wires up

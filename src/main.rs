@@ -63,8 +63,9 @@ enum Command {
     /// Bootstrap config, rule scripts, and hook wiring
     ///
     /// Writes the shipped rule scripts, seeds a default config.toml,
-    /// ensures the cupcake stub project exists, and wires the hook commands
-    /// into Claude Code's settings.json. Safe to re-run.
+    /// ensures cerberus's cupcake project and policy store exist, composes
+    /// the tirith overlay, and wires the hook commands into Claude Code's
+    /// settings.json. Safe to re-run.
     Init,
     /// Manage layered policy sources (a team repo, cerberus-examples, ...)
     ///
@@ -90,14 +91,27 @@ enum Command {
 #[derive(Subcommand)]
 enum SourceCommand {
     /// Clone a policy source, install it, and pin its resolved commit
+    ///
+    /// Takes a GitHub owner/repo slug or any git URL:
+    ///
+    ///   cerberus source add ahokinson/cerberus-rules
+    ///   cerberus source add gh:myorg/policies --ref v1.2.0
+    ///   cerberus source add https://gitlab.example.com/team/policies.git
+    ///
+    /// The source's name is the repository's, unless --name says otherwise.
+    /// The older two-argument form (`add <name> <git-url>`) still works.
     Add {
-        /// A short name for this source (lowercase letters, digits, '-', '_')
-        name: String,
-        /// The git URL to clone
-        git: String,
+        /// An owner/repo slug, a git URL, or — in the two-argument form —
+        /// the source's name
+        spec: String,
+        /// The git URL to clone, when naming the source explicitly
+        git: Option<String>,
         /// Branch or tag to track (default: the remote's default branch)
         #[arg(long)]
         r#ref: Option<String>,
+        /// Override the source name (lowercase letters, digits, '-', '_')
+        #[arg(long)]
+        name: Option<String>,
     },
     /// Remove a configured source and its installed rules/policies
     Remove {
@@ -163,22 +177,49 @@ fn main() {
     }
 }
 
-/// Surfaces the one `RegoCheck` outcome that isn't self-evident from the
-/// success message alone: content installed without `opa` on hand to check
-/// it. `NotApplicable`/`Passed` need no comment.
-fn warn_if_rego_unvalidated(check: sources::RegoCheck) {
-    if check == sources::RegoCheck::Skipped {
+/// Surfaces the one `ContentCheck` outcome that isn't self-evident from the
+/// success message alone: content installed without the validating binary
+/// on hand to check it. `NotApplicable`/`Passed` need no comment.
+fn warn_if_content_unvalidated(check: sources::ContentCheck) {
+    if check == sources::ContentCheck::Skipped {
         eprintln!(
-            "  warning: opa not on PATH, so this source's .rego policies were installed unvalidated"
+            "  warning: opa and/or tirith not on PATH, so some of this source's content was \
+             installed unvalidated"
         );
+    }
+}
+
+/// Prints a source's non-fatal findings. These go to stderr and aren't
+/// abbreviated: the case they exist for is a tirith rule that installs and
+/// validates but can never fire, which looks like success everywhere else.
+fn print_warnings(warnings: &[String]) {
+    for warning in warnings {
+        eprintln!("  warning: {warning}");
     }
 }
 
 fn run_source(paths: &Paths, action: SourceCommand) -> i32 {
     match action {
-        SourceCommand::Add { name, git, r#ref } => {
-            match sources::add(paths, &name, &git, r#ref.as_deref()) {
-                Ok(sources::AddOutcome { source, rego_check }) => {
+        SourceCommand::Add {
+            spec,
+            git,
+            r#ref,
+            name,
+        } => {
+            let parsed = match sources::spec::parse(&spec, git.as_deref(), name.as_deref()) {
+                Ok(parsed) => parsed,
+                Err(e) => {
+                    eprintln!("couldn't add source: {e}");
+                    return 1;
+                }
+            };
+            match sources::add(paths, &parsed.name, &parsed.git, r#ref.as_deref()) {
+                Ok(sources::AddOutcome {
+                    source,
+                    content_check,
+                    installed,
+                    warnings,
+                }) => {
                     println!(
                         "source '{}' added: {}{}",
                         source.name,
@@ -189,11 +230,13 @@ fn run_source(paths: &Paths, action: SourceCommand) -> i32 {
                             .map(|p| format!(" @ {p}"))
                             .unwrap_or_default()
                     );
-                    warn_if_rego_unvalidated(rego_check);
+                    println!("  installed {installed}");
+                    warn_if_content_unvalidated(content_check);
+                    print_warnings(&warnings);
                     0
                 }
                 Err(e) => {
-                    eprintln!("couldn't add source '{name}': {e}");
+                    eprintln!("couldn't add source '{}': {e}", parsed.name);
                     1
                 }
             }
@@ -247,14 +290,18 @@ fn run_source(paths: &Paths, action: SourceCommand) -> i32 {
                     sources::SyncStatus::Applied {
                         from,
                         to,
-                        rego_check,
+                        content_check,
+                        installed,
+                        warnings,
                     } => {
                         println!(
                             "{}: updated {} -> {to}",
                             r.name,
                             from.as_deref().unwrap_or("(none)")
                         );
-                        warn_if_rego_unvalidated(rego_check);
+                        println!("  installed {installed}");
+                        warn_if_content_unvalidated(content_check);
+                        print_warnings(&warnings);
                     }
                     sources::SyncStatus::PendingConfirmation {
                         from,

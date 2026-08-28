@@ -7,6 +7,97 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- **cerberus owns its runtime layout, and no longer touches your cupcake
+  install.** Everything cerberus creates now lives under a single
+  `cerberus/` namespace: `$XDG_DATA_HOME/cerberus/{cupcake,tirith,
+  cupcake-init-home}` and `$XDG_CONFIG_HOME/cerberus/{rules,tirith,cupcake}`.
+  The three former top-level directories (`cupcake-stub/`,
+  `cerberus-tirith-overlay/`, `cupcake-global-init-home/`) are removed by
+  `cerberus init`, reported by name.
+
+  Two of those names existed only as workarounds. `cupcake eval` takes
+  `--policy-dir`, so cerberus no longer runs it with `current_dir` set to a
+  stub project to satisfy cwd-based discovery; and it takes
+  `--global-config`, so cerberus's policies live in a store it owns
+  (`$XDG_CONFIG_HOME/cerberus/cupcake/`) instead of being written into the
+  user's `~/.config/cupcake` behind a reserved `custom/cerberus/`
+  subdirectory. That reservation existed purely to avoid colliding with a
+  user's own onboarded policies; with a store of its own there is nothing to
+  collide with, so the policies sit at `policies/claude/cerberus/`. The
+  `claude/` segment stays because it is cupcake's addressing — the global
+  phase scans `policies/<harness>/` and only that, so a policy outside it is
+  never evaluated — and it matches the `--harness claude` cerberus passes
+  deliberately, every harness's payload having been normalized into Claude's
+  wire format at the edge.
+
+  Both flags were verified against cupcake 0.5.2, where `--help` is
+  misleading on each: `--policy-dir` wants the project root's `.cupcake`
+  directory rather than the `policies` directory inside it (cupcake derives
+  the root as its parent), and `--global-config` is documented as a "file
+  path" but must be an existing absolute directory — and is honored by
+  `eval` while being silently ignored by `verify`/`inspect`. Getting either
+  wrong fails open, so `shipped_cupcake_policies_evaluate_correctly_end_to_end`
+  now runs through the real `cupcake::evaluate` instead of re-implementing
+  the subprocess call, and asserts the store lands where the redirect
+  intends. `cupcake init` still scaffolds both locations rather than
+  cerberus writing them from embedded content: it produces
+  `policies/claude/system/evaluate.rego`, the WASM entrypoint the engine
+  compiles against, and a hand-rolled copy would pin cerberus to one cupcake
+  version and turn a cupcake upgrade into a silently degraded policy head.
+
+  `guard-self-protection.rego` and `cerberus-guard-self-tamper` both key on
+  directory names, so both were updated; the collapse to one namespace made
+  each simpler rather than longer.
+
+### Added
+
+- **Custom tirith rules, injected through cerberus.** tirith reads exactly
+  one policy file and its schema has no `extends`/`import`, so natively a
+  machine can have cerberus's rules or its own or a team's — never all
+  three. `cerberus init` now *composes* the overlay
+  (`src/integrations/tirith/compose.rs`) from cerberus's embedded base, the
+  user's own `$XDG_CONFIG_HOME/cerberus/tirith/*.yaml` fragments (the risk
+  head's counterpart to dropping a `.rhai` file into the rules directory),
+  and every configured source's, rather than writing one embedded blob.
+
+  A layer can tighten the posture but never loosen it: `fail_mode`,
+  `allow_bypass_env_noninteractive`, and `schema_version` come from the base
+  and a layer setting one is reported and ignored, while `paranoia` merges
+  as a maximum. A fragment that won't parse is skipped rather than fatal, so
+  cerberus's own rules — and `health`'s canary — survive anything a fragment
+  contains. Output is deterministic because `init`, `source sync`, and the
+  guard-time self-heal all regenerate the file independently and have to
+  agree; the self-heal recomposes rather than rewriting a fixed blob, which
+  would otherwise silently strip a team's rules for the rest of a session.
+
+- **Sources cover all three heads, and load from a GitHub slug.** A source
+  repo may now carry `tirith/*.yaml` alongside `rules/*.rhai` and
+  `policies/*.rego`; `add`/`sync`/`remove` install it and recompose the
+  overlay, with each source's rule ids prefixed by the source name so two
+  teams can both ship a `no-force-push`. `cerberus source add
+  ahokinson/cerberus-rules` now works — a GitHub `owner/repo` slug or a
+  `gh:`/`github:` prefix expands to a URL, and the source is named after the
+  repository unless `--name` says otherwise. The two-argument
+  `add <name> <git-url>` form is unchanged. `add`/`sync`/`list` report
+  per-head counts.
+
+- **Injected tirith rules are checked for whether they can actually fire.**
+  `tirith check` only consults `custom_rules` once tirith's own built-in
+  detections have escalated a command past tier 1, so a rule matching
+  nothing tirith already finds interesting never runs in production — even
+  though `tirith rule validate` accepts it and `tirith rule test` reports it
+  firing. That trap cost this project two of its own three original rules;
+  layering makes it far worse, since a source can ship any number and
+  "cerberus installed your team's rules and they enforce nothing" is exactly
+  the silent failure the rest of this design exists to prevent. A rule may
+  now declare `examples_bad:`, and `source add`/`sync` run each through the
+  real `tirith check` against the real composed policy
+  (`tirith::rules_that_never_fire`, attributing findings via tirith's
+  `custom_rule_id`), warning about any rule that never fires. Rules without
+  examples aren't reported as broken, just unverified.
+
 ### Fixed
 
 - **The risk head never self-healed its own overlay.** `evaluate`/`health`

@@ -1,7 +1,15 @@
-//! Layered policy sources: named, independently syncable external
-//! `.rhai`/`.rego` bundles (e.g. a team repo, or eventually a public
-//! cerberus-examples repo) that stack on top of a machine's personal rules
-//! (see `rules::evaluate`'s additive OR-of-denials).
+//! Layered policy sources: named, independently syncable external bundles
+//! (e.g. a team repo, or eventually a public cerberus-examples repo) that
+//! stack on top of a machine's personal rules (see `rules::evaluate`'s
+//! additive OR-of-denials).
+//!
+//! A source repo carries content for **all three heads** — `rules/*.rhai`
+//! for judgement, `policies/*.rego` for policy, `tirith/*.yaml` for risk —
+//! which is what makes `cerberus source add` worth using over wiring each
+//! tool up by hand. The risk half is the part with no native equivalent at
+//! all: tirith reads exactly one policy file and has no way to layer, so
+//! cerberus composes every source's fragments into it
+//! (`integrations::tirith::compose`).
 //!
 //! Trust model: `add` clones and pins a resolved commit SHA, and a plain
 //! `cerberus init`/`cerberus guard` never touches the network — only
@@ -12,8 +20,11 @@
 //! before it's ever applied.
 
 mod repo;
+pub mod spec;
 
 use crate::config::{self, SourceConfig};
+use crate::init;
+use crate::integrations::tirith::{self, compose};
 use crate::paths::Paths;
 use crate::process::command_exists;
 use std::fs;
@@ -21,36 +32,55 @@ use std::io;
 use std::path::Path;
 use std::process::Command;
 
-/// The outcome of validating a source's fetched `.rego` files with
-/// `opa check` before they're ever installed. This is a supply-chain safety
-/// gate on *untrusted content coming from a source*, distinct from the
-/// `policy` head's own fail-open philosophy about a *missing binary at
-/// guard time* — a source that ships broken or malicious-shaped Rego
-/// should never be installed at all, not surface as a `cupcake` error (or a
-/// silently degraded `policy` head) later.
+/// The outcome of validating a source's fetched content — `.rego` through
+/// `opa check`, `tirith/*.yaml` through `tirith rule validate` on the
+/// composed policy — before any of it is installed. This is a supply-chain
+/// safety gate on *untrusted content coming from a source*, distinct from
+/// the heads' own fail-open philosophy about a *missing binary at guard
+/// time*: a source that ships broken content should never be installed at
+/// all, rather than surfacing as a `cupcake`/`tirith` error (or a silently
+/// degraded head) later.
+///
+/// Both kinds collapse into one type deliberately, so a caller can't report
+/// on one and forget the other.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum RegoCheck {
-    /// The source ships no `.rego` files at all — nothing to validate.
+pub enum ContentCheck {
+    /// The source ships nothing of this kind — nothing to validate.
     NotApplicable,
-    /// Every `.rego` file parses and compiles cleanly.
+    /// Everything parses and compiles cleanly.
     Passed,
-    /// `opa` isn't on PATH, so validation couldn't run. The content is
-    /// still installed — cerberus doesn't require `opa` merely to accept a
-    /// source, only to enforce the `policy` head — but this is surfaced so
-    /// the caller can warn that it went in unchecked.
+    /// The validating binary isn't on PATH, so the check couldn't run. The
+    /// content is still installed — cerberus doesn't require `opa` or
+    /// `tirith` merely to *accept* a source, only to enforce the
+    /// corresponding head — but this is surfaced so the caller can warn
+    /// that it went in unchecked.
     Skipped,
+}
+
+impl ContentCheck {
+    /// Merges two checks into the one a caller should report. `Skipped`
+    /// dominates `Passed`, so a source whose Rego was validated but whose
+    /// tirith fragments weren't still warns; `NotApplicable` never hides a
+    /// real result.
+    fn merge(self, other: Self) -> Self {
+        match (self, other) {
+            (Self::Skipped, _) | (_, Self::Skipped) => Self::Skipped,
+            (Self::Passed, _) | (_, Self::Passed) => Self::Passed,
+            _ => Self::NotApplicable,
+        }
+    }
 }
 
 /// Runs `opa check` over `dir`'s `.rego` files, if there are any and `opa`
 /// is available. Returns `Err` only when `opa` actually rejected the
 /// content: that's the one outcome that must abort an `add`/`sync` before
 /// anything is installed.
-fn check_rego(dir: &Path) -> Result<RegoCheck, String> {
+fn check_rego(dir: &Path) -> Result<ContentCheck, String> {
     if !contains_ext_recursive(dir, "rego") {
-        return Ok(RegoCheck::NotApplicable);
+        return Ok(ContentCheck::NotApplicable);
     }
     if !command_exists("opa") {
-        return Ok(RegoCheck::Skipped);
+        return Ok(ContentCheck::Skipped);
     }
     let output = Command::new("opa")
         .arg("check")
@@ -58,10 +88,98 @@ fn check_rego(dir: &Path) -> Result<RegoCheck, String> {
         .output()
         .map_err(|e| format!("failed to run opa check: {e}"))?;
     if output.status.success() {
-        Ok(RegoCheck::Passed)
+        Ok(ContentCheck::Passed)
     } else {
         Err(String::from_utf8_lossy(&output.stderr).trim().to_string())
     }
+}
+
+/// Validates a source's tirith fragments by composing a *candidate* overlay
+/// — cerberus's base plus everything already installed plus this source's
+/// fetched fragments — and running the real `tirith rule validate` over it.
+///
+/// Composing first, rather than validating a fragment alone, is the only
+/// check worth anything: a fragment is a partial policy with no
+/// `schema_version`, so tirith can't judge it in isolation, and what
+/// actually has to be valid is the merged file `tirith check` will read.
+/// This also catches a fragment that's individually fine but breaks the
+/// composition (a duplicate rule id that survived namespacing, say).
+///
+/// Mirrors [`check_rego`]'s contract exactly: a rejection aborts the whole
+/// operation before anything is installed, and a missing `tirith` binary
+/// skips with a warning rather than blocking the source.
+fn check_tirith(
+    paths: &Paths,
+    name: &str,
+    cache: &Path,
+) -> Result<(ContentCheck, Vec<String>), String> {
+    let fragments = cache.join("tirith");
+    if !contains_ext_recursive(&fragments, "yaml") {
+        return Ok((ContentCheck::NotApplicable, Vec::new()));
+    }
+    if !command_exists("tirith") {
+        return Ok((ContentCheck::Skipped, Vec::new()));
+    }
+
+    // Everything already configured, minus this source (a `sync` is
+    // replacing its installed fragments, not stacking on them), plus what
+    // was just fetched.
+    let mut layers: Vec<compose::Layer> = compose::collect_layers(paths)
+        .into_iter()
+        .filter(|l| l.namespace.as_deref() != Some(name))
+        .collect();
+    layers.extend(compose::read_fragments_from(
+        &fragments,
+        Some(name.to_string()),
+        &format!("source '{name}'"),
+    ));
+
+    let composed = compose::compose(crate::embedded::TIRITH_POLICY, &layers);
+    if let Some(problem) = composed.problems.first() {
+        return Err(problem.clone());
+    }
+
+    let scratch = paths.source_cache_dir(name).with_extension("validate");
+    let _ = fs::remove_dir_all(&scratch);
+    fs::create_dir_all(&scratch).map_err(|e| format!("couldn't create a scratch dir: {e}"))?;
+    let candidate = scratch.join("policy.yaml");
+    fs::write(&candidate, &composed.yaml)
+        .map_err(|e| format!("couldn't write a candidate policy: {e}"))?;
+
+    let output = Command::new("tirith")
+        .args(["rule", "validate", "--path"])
+        .arg(&candidate)
+        .output();
+
+    let verdict = match output {
+        Ok(out) if out.status.success() => Ok(ContentCheck::Passed),
+        Ok(out) => Err(String::from_utf8_lossy(&out.stderr).trim().to_string()),
+        Err(e) => Err(format!("failed to run tirith rule validate: {e}")),
+    };
+    if verdict.is_err() {
+        let _ = fs::remove_dir_all(&scratch);
+        return verdict.map(|c| (c, Vec::new()));
+    }
+
+    // Validation only proves the rules are well-formed. Whether they can
+    // ever actually fire is a separate — and much easier to get wrong —
+    // question; see `tirith::rules_that_never_fire`.
+    let never_fire = tirith::rules_that_never_fire(&composed.yaml, &scratch);
+    let _ = fs::remove_dir_all(&scratch);
+
+    let warnings = never_fire
+        .into_iter()
+        .map(|id| {
+            format!(
+                "rule '{id}' did not fire for any of its own examples_bad. `tirith check` only \
+                 consults custom rules once tirith's built-in detections have escalated a \
+                 command past tier 1, so a rule matching nothing tirith already finds \
+                 interesting never runs in production — even though it validates cleanly. It is \
+                 installed, but it is not enforcing anything."
+            )
+        })
+        .collect();
+    verdict.map(|c| (c, warnings))
 }
 
 /// Whether any file with `ext` exists anywhere under `dir`, at any depth.
@@ -100,7 +218,9 @@ pub enum SyncStatus {
     Applied {
         from: Option<String>,
         to: String,
-        rego_check: RegoCheck,
+        content_check: ContentCheck,
+        installed: Installed,
+        warnings: Vec<String>,
     },
     /// An update is available but wasn't applied (`apply: false`). `log`
     /// and `diffstat` are empty when there was no previous `pinned` commit
@@ -115,18 +235,24 @@ pub enum SyncStatus {
     Failed(String),
 }
 
-/// What `add` produces on success: the recorded source plus whether its
-/// `.rego` content (if any) was actually validated. See [`RegoCheck`].
+/// What `add` produces on success: the recorded source, whether its content
+/// was actually validated (see [`ContentCheck`]), and how much of each
+/// head's content it turned out to carry.
 #[derive(Debug)]
 pub struct AddOutcome {
     pub source: SourceConfig,
-    pub rego_check: RegoCheck,
+    pub content_check: ContentCheck,
+    pub installed: Installed,
+    /// Non-fatal findings worth showing the user — currently a tirith rule
+    /// that validates but can never fire. Installed, but not enforcing.
+    pub warnings: Vec<String>,
 }
 
 /// Clones `git_url`, resolves `git_ref` (or the remote's default branch if
-/// `None`) to a commit, validates any `.rego` it ships with `opa check`,
-/// installs its `rules/*.rhai` and `policies/*.rego`, and records the
-/// source in `config.toml`. A `.rego` file `opa` rejects aborts the whole
+/// `None`) to a commit, validates whatever it ships (`.rego` via
+/// `opa check`, `tirith/*.yaml` via `tirith rule validate` on the composed
+/// policy), installs its content for all three heads, and records the
+/// source in `config.toml`. Content a validator rejects aborts the whole
 /// operation: nothing is installed and `config.toml` isn't touched.
 pub fn add(
     paths: &Paths,
@@ -147,9 +273,8 @@ pub fn add(
     repo::clone(git_url, &cache)?;
     let sha = repo::resolve_ref(&cache, git_ref)?;
     repo::checkout(&cache, &sha)?;
-    let rego_check = check_rego(&cache.join("policies"))
-        .map_err(|e| format!("source '{name}' failed opa validation: {e}"))?;
-    install_from_cache(paths, name)
+    let (content_check, warnings) = validate_cache(paths, name, &cache)?;
+    let installed = install_from_cache(paths, name)
         .map_err(|e| format!("couldn't install source '{name}': {e}"))?;
 
     let source = SourceConfig {
@@ -160,18 +285,60 @@ pub fn add(
     };
     config::upsert_source(&paths.config_file(), source.clone())
         .map_err(|e| format!("couldn't write config.toml: {e}"))?;
-    Ok(AddOutcome { source, rego_check })
+    // Only once config.toml names the source does `collect_layers` see its
+    // fragments, so the overlay is rewritten after the upsert, not before.
+    refresh_tirith_overlay(paths);
+    Ok(AddOutcome {
+        source,
+        content_check,
+        installed,
+        warnings,
+    })
 }
 
-/// Removes a source's config entry, installed rules/policies, and cached
-/// clone. Returns whether a configured entry actually existed (the on-disk
-/// cleanup happens either way, best-effort).
+/// Runs every content validator over a fetched clone and combines their
+/// verdicts, along with any non-fatal warnings. Errors name which validator
+/// objected, since "opa rejected this" and "tirith rejected this" want
+/// completely different fixes.
+fn validate_cache(
+    paths: &Paths,
+    name: &str,
+    cache: &Path,
+) -> Result<(ContentCheck, Vec<String>), String> {
+    let rego = check_rego(&cache.join("policies"))
+        .map_err(|e| format!("source '{name}' failed opa validation: {e}"))?;
+    let (tirith, warnings) = check_tirith(paths, name, cache)
+        .map_err(|e| format!("source '{name}' failed tirith validation: {e}"))?;
+    Ok((rego.merge(tirith), warnings))
+}
+
+/// Recomposes and rewrites the tirith overlay after a source's fragments
+/// change — the risk head's equivalent of the `.rhai`/`.rego` files simply
+/// appearing on disk, since tirith reads one composed file rather than a
+/// directory.
+///
+/// Best-effort: by this point the source is already installed and recorded,
+/// and `guard`'s own self-heal recomposes anyway if the file turns out not
+/// to have loaded, so a failure here must not fail the operation.
+fn refresh_tirith_overlay(paths: &Paths) {
+    let _ = init::write_tirith_overlay(paths);
+}
+
+/// Removes a source's config entry, its installed content for all three
+/// heads, and its cached clone, then recomposes the tirith overlay so the
+/// source's rules stop enforcing immediately. Returns whether a configured
+/// entry actually existed (the on-disk cleanup happens either way,
+/// best-effort).
 pub fn remove(paths: &Paths, name: &str) -> Result<bool, String> {
     let removed = config::remove_source(&paths.config_file(), name)
         .map_err(|e| format!("couldn't update config.toml: {e}"))?;
     let _ = fs::remove_dir_all(paths.source_rules_dir(name));
-    let _ = fs::remove_dir_all(paths.cupcake_source_custom_dir(name));
+    let _ = fs::remove_dir_all(paths.cupcake_source_policies_dir(name));
+    let _ = fs::remove_dir_all(paths.source_tirith_dir(name));
     let _ = fs::remove_dir_all(paths.source_cache_dir(name));
+    // Deleting the fragments isn't enough on its own: they're already baked
+    // into the composed policy tirith reads, so it has to be rebuilt.
+    refresh_tirith_overlay(paths);
     Ok(removed)
 }
 
@@ -235,53 +402,87 @@ fn sync_one(paths: &Paths, source: &SourceConfig, apply: bool) -> SyncStatus {
     if let Err(e) = repo::checkout(&cache, &resolved) {
         return SyncStatus::Failed(e);
     }
-    let rego_check = match check_rego(&cache.join("policies")) {
-        Ok(c) => c,
-        Err(e) => return SyncStatus::Failed(format!("opa validation failed: {e}")),
+    let (content_check, warnings) = match validate_cache(paths, &source.name, &cache) {
+        Ok(v) => v,
+        Err(e) => return SyncStatus::Failed(e),
     };
-    if let Err(e) = install_from_cache(paths, &source.name) {
-        return SyncStatus::Failed(format!("couldn't install source '{}': {e}", source.name));
-    }
+    let installed = match install_from_cache(paths, &source.name) {
+        Ok(i) => i,
+        Err(e) => {
+            return SyncStatus::Failed(format!("couldn't install source '{}': {e}", source.name));
+        }
+    };
     let mut updated = source.clone();
     updated.pinned = Some(resolved.clone());
     if let Err(e) = config::upsert_source(&paths.config_file(), updated) {
         return SyncStatus::Failed(format!("couldn't write config.toml: {e}"));
     }
+    refresh_tirith_overlay(paths);
     SyncStatus::Applied {
         from: source.pinned.clone(),
         to: resolved,
-        rego_check,
+        content_check,
+        installed,
+        warnings,
     }
 }
 
-fn install_from_cache(paths: &Paths, name: &str) -> io::Result<()> {
-    let cache = paths.source_cache_dir(name);
-    reject_nested_rules(&cache.join("rules"))?;
-    install_matching_ext(&cache.join("rules"), &paths.source_rules_dir(name), "rhai")?;
-    install_matching_ext(
-        &cache.join("policies"),
-        &paths.cupcake_source_custom_dir(name),
-        "rego",
-    )?;
-    Ok(())
+/// How much of each head's content a source turned out to carry. Reported
+/// back to the user by `add`/`sync`/`list` so "did my team's rules actually
+/// land" is answerable without going digging on the filesystem.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub struct Installed {
+    pub rules: usize,
+    pub policies: usize,
+    pub tirith: usize,
 }
 
-/// `rules/*.rhai` must stay flat: `engine::load_rules` reads a single
-/// directory level, so a nested script would install but silently never
-/// run — the "quietly stopped working" failure mode this codebase exists
-/// to prevent. Reject the layout at `add`/`sync` time instead, loudly.
-/// (`policies/` has no such constraint: cupcake's own scanner is
-/// recursive, so nested policies install *and* enforce.)
-fn reject_nested_rules(rules_src: &Path) -> io::Result<()> {
-    let Ok(entries) = fs::read_dir(rules_src) else {
+impl std::fmt::Display for Installed {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "{} rule(s), {} polic(ies), {} tirith fragment(s)",
+            self.rules, self.policies, self.tirith
+        )
+    }
+}
+
+fn install_from_cache(paths: &Paths, name: &str) -> io::Result<Installed> {
+    let cache = paths.source_cache_dir(name);
+    reject_nested(&cache.join("rules"), "rhai", "rules")?;
+    reject_nested(&cache.join("tirith"), "yaml", "tirith")?;
+    Ok(Installed {
+        rules: install_matching_ext(&cache.join("rules"), &paths.source_rules_dir(name), "rhai")?,
+        policies: install_matching_ext(
+            &cache.join("policies"),
+            &paths.cupcake_source_policies_dir(name),
+            "rego",
+        )?,
+        tirith: install_matching_ext(
+            &cache.join("tirith"),
+            &paths.source_tirith_dir(name),
+            "yaml",
+        )?,
+    })
+}
+
+/// `rules/*.rhai` and `tirith/*.yaml` must stay flat: `engine::load_rules`
+/// and `compose::read_fragments` each read a single directory level, so a
+/// nested file would install but silently never run — the "quietly stopped
+/// working" failure mode this codebase exists to prevent. Reject the layout
+/// at `add`/`sync` time instead, loudly. (`policies/` has no such
+/// constraint: cupcake's own scanner is recursive, so nested policies
+/// install *and* enforce.)
+fn reject_nested(src: &Path, ext: &str, label: &str) -> io::Result<()> {
+    let Ok(entries) = fs::read_dir(src) else {
         return Ok(());
     };
     for entry in entries.filter_map(|e| e.ok()) {
         let path = entry.path();
-        if entry.file_type().is_ok_and(|t| t.is_dir()) && contains_ext_recursive(&path, "rhai") {
+        if entry.file_type().is_ok_and(|t| t.is_dir()) && contains_ext_recursive(&path, ext) {
             return Err(io::Error::other(format!(
-                "{} contains .rhai files in subdirectories; a source's rules/ must be flat \
-                 (policies/ may nest, rules/ may not)",
+                "{} contains .{ext} files in subdirectories; a source's {label}/ must be flat \
+                 (policies/ may nest, {label}/ may not)",
                 path.display()
             )));
         }
@@ -289,7 +490,8 @@ fn reject_nested_rules(rules_src: &Path) -> io::Result<()> {
     Ok(())
 }
 
-/// Fully replaces `dest`'s contents with every `*.ext` file from `src`,
+/// Returns how many files were installed. Fully replaces `dest`'s contents
+/// with every `*.ext` file from `src`,
 /// preserving `src`'s subdirectory layout: `policies/cloud/destructive.rego`
 /// installs to `dest/cloud/destructive.rego`. Nesting matters for real
 /// sources — one organized by category can carry two different
@@ -298,12 +500,12 @@ fn reject_nested_rules(rules_src: &Path) -> io::Result<()> {
 /// subdirectory) is exclusively sync-managed — unlike the top-level rules
 /// dir, where personal files also live. A source that ships only rules or
 /// only policies is fine: a missing `src` is a no-op, not an error.
-fn install_matching_ext(src: &Path, dest: &Path, ext: &str) -> io::Result<()> {
+fn install_matching_ext(src: &Path, dest: &Path, ext: &str) -> io::Result<usize> {
     if dest.exists() {
         fs::remove_dir_all(dest)?;
     }
     if !src.is_dir() {
-        return Ok(());
+        return Ok(0);
     }
     install_dir(src, dest, ext)
 }
@@ -313,8 +515,9 @@ fn install_matching_ext(src: &Path, dest: &Path, ext: &str) -> io::Result<()> {
 /// `DirEntry::file_type` rather than following symlinks, so a symlinked
 /// directory in a hostile source is skipped rather than followed — the
 /// copy can never escape `dest` or loop.
-fn install_dir(src: &Path, dest: &Path, ext: &str) -> io::Result<()> {
+fn install_dir(src: &Path, dest: &Path, ext: &str) -> io::Result<usize> {
     fs::create_dir_all(dest)?;
+    let mut installed = 0;
     for entry in fs::read_dir(src)? {
         let entry = entry?;
         let path = entry.path();
@@ -322,12 +525,13 @@ fn install_dir(src: &Path, dest: &Path, ext: &str) -> io::Result<()> {
             continue;
         };
         if entry.file_type()?.is_dir() {
-            install_dir(&path, &dest.join(&file_name), ext)?;
+            installed += install_dir(&path, &dest.join(&file_name), ext)?;
         } else if path.extension().and_then(|e| e.to_str()) == Some(ext) {
             fs::copy(&path, dest.join(&file_name))?;
+            installed += 1;
         }
     }
-    Ok(())
+    Ok(installed)
 }
 
 #[cfg(test)]
@@ -372,6 +576,7 @@ mod tests {
         run_git(&dir, &["config", "user.name", "Test"]);
         fs::create_dir_all(dir.join("rules")).unwrap();
         fs::create_dir_all(dir.join("policies")).unwrap();
+        fs::create_dir_all(dir.join("tirith")).unwrap();
         fs::write(
             dir.join("rules/deny-all.rhai"),
             "fn check(cmd, cwd, input) { return \"denied by upstream rule\"; }",
@@ -382,13 +587,22 @@ mod tests {
             "package cupcake.global.policies.cerberus.sources.example\n",
         )
         .unwrap();
+        fs::write(
+            dir.join("tirith/risky.yaml"),
+            "custom_rules:\n  - id: upstream-risk\n    context: [exec]\n    \
+             pattern: 'zzz-upstream'\n    severity: HIGH\n    action: block\n    \
+             title: An upstream risk rule\n",
+        )
+        .unwrap();
         run_git(&dir, &["add", "."]);
         run_git(&dir, &["commit", "-q", "-m", "initial"]);
         dir
     }
 
+    /// One repo, all three heads. This is the property that makes a source
+    /// worth using over wiring tirith and cupcake up by hand.
     #[test]
-    fn add_installs_rules_and_policies_and_records_config() {
+    fn add_installs_content_for_all_three_heads_and_records_config() {
         let paths = scratch_paths("add");
         let upstream = make_upstream("add");
 
@@ -397,9 +611,17 @@ mod tests {
         assert_eq!(source.name, "team");
         assert!(source.pinned.is_some());
         assert!(matches!(
-            outcome.rego_check,
-            RegoCheck::Passed | RegoCheck::Skipped
+            outcome.content_check,
+            ContentCheck::Passed | ContentCheck::Skipped
         ));
+        assert_eq!(
+            outcome.installed,
+            Installed {
+                rules: 1,
+                policies: 1,
+                tirith: 1
+            }
+        );
 
         assert!(
             paths
@@ -409,11 +631,61 @@ mod tests {
         );
         assert!(
             paths
-                .cupcake_source_custom_dir("team")
+                .cupcake_source_policies_dir("team")
                 .join("example.rego")
                 .is_file()
         );
+        assert!(
+            paths.source_tirith_dir("team").join("risky.yaml").is_file(),
+            "the risk head's half of a source has to install too"
+        );
         assert_eq!(list(&paths), vec![source]);
+    }
+
+    /// A tirith fragment that merely lands on disk enforces nothing —
+    /// tirith reads one composed file. `add` has to rebuild it, with the
+    /// source's rule id namespaced, or the risk head silently ignores
+    /// everything the source shipped.
+    #[test]
+    fn add_composes_the_source_into_the_live_tirith_overlay() {
+        let paths = scratch_paths("add-composes");
+        let upstream = make_upstream("add-composes");
+        add(&paths, "team", &upstream.to_string_lossy(), None).unwrap();
+
+        let overlay = fs::read_to_string(paths.tirith_overlay_policy_file())
+            .expect("add must write the composed overlay");
+        assert!(
+            overlay.contains("team-upstream-risk"),
+            "the source's rule must be namespaced into the overlay: {overlay}"
+        );
+        assert!(
+            overlay.contains("cerberus-guard-self-tamper"),
+            "and must not displace cerberus's own rule: {overlay}"
+        );
+    }
+
+    /// The mirror of the above: removing a source has to rebuild the
+    /// overlay too, or its rules keep enforcing after it's gone.
+    #[test]
+    fn remove_recomposes_the_overlay_without_the_source() {
+        let paths = scratch_paths("remove-recomposes");
+        let upstream = make_upstream("remove-recomposes");
+        add(&paths, "team", &upstream.to_string_lossy(), None).unwrap();
+        assert!(
+            fs::read_to_string(paths.tirith_overlay_policy_file())
+                .unwrap()
+                .contains("team-upstream-risk")
+        );
+
+        remove(&paths, "team").unwrap();
+
+        let overlay = fs::read_to_string(paths.tirith_overlay_policy_file()).unwrap();
+        assert!(
+            !overlay.contains("team-upstream-risk"),
+            "a removed source's rules must stop enforcing: {overlay}"
+        );
+        assert!(overlay.contains("cerberus-guard-self-tamper"));
+        assert!(!paths.source_tirith_dir("team").exists());
     }
 
     /// A source organized by category (`policies/cloud/destructive.rego`,
@@ -440,7 +712,7 @@ mod tests {
 
         let outcome = add(&paths, "team", &upstream.to_string_lossy(), None).unwrap();
 
-        let installed = paths.cupcake_source_custom_dir("team");
+        let installed = paths.cupcake_source_policies_dir("team");
         assert!(installed.join("cloud/destructive.rego").is_file());
         assert!(installed.join("database/destructive.rego").is_file());
         assert!(
@@ -449,7 +721,7 @@ mod tests {
         );
         // A flat rego check would classify this source as NotApplicable and
         // skip the opa gate entirely; nested policies must still be gated.
-        assert_ne!(outcome.rego_check, RegoCheck::NotApplicable);
+        assert_ne!(outcome.content_check, ContentCheck::NotApplicable);
     }
 
     /// `rules/` must stay flat: the rhai loader reads one directory level,
@@ -474,8 +746,66 @@ mod tests {
             "unexpected error: {err}"
         );
         assert!(!paths.source_rules_dir("team").exists());
-        assert!(!paths.cupcake_source_custom_dir("team").exists());
+        assert!(!paths.cupcake_source_policies_dir("team").exists());
         assert_eq!(list(&paths), vec![]);
+    }
+
+    /// `compose::read_fragments_from` reads one directory level, so a
+    /// nested fragment would install and never merge — the same
+    /// silently-dead-content trap as a nested `.rhai`, and rejected the
+    /// same way.
+    #[test]
+    fn add_rejects_a_source_with_nested_tirith_fragments() {
+        let paths = scratch_paths("add-nested-tirith");
+        let upstream = make_upstream("add-nested-tirith");
+        fs::create_dir_all(upstream.join("tirith/nested")).unwrap();
+        fs::write(
+            upstream.join("tirith/nested/deep.yaml"),
+            "custom_rules: []\n",
+        )
+        .unwrap();
+        run_git(&upstream, &["add", "."]);
+        run_git(&upstream, &["commit", "-q", "-m", "nested tirith"]);
+
+        let err = add(&paths, "team", &upstream.to_string_lossy(), None).unwrap_err();
+        assert!(
+            err.contains("tirith/ must be flat"),
+            "unexpected error: {err}"
+        );
+        assert!(!paths.source_tirith_dir("team").exists());
+        assert_eq!(list(&paths), vec![]);
+    }
+
+    /// The tirith counterpart to the `opa check` gate: content tirith
+    /// rejects must abort the whole `add`, with nothing installed for any
+    /// head and no entry in config.toml.
+    #[test]
+    fn add_rejects_a_source_whose_tirith_fragment_tirith_wont_accept() {
+        if !command_exists("tirith") {
+            eprintln!("skipping: tirith not on PATH");
+            return;
+        }
+        let paths = scratch_paths("add-tirith-rejects");
+        let upstream = make_upstream("add-tirith-rejects");
+        // A custom rule must carry exactly one of `pattern:`/`when:`;
+        // declaring neither is a shape tirith rejects outright.
+        fs::write(
+            upstream.join("tirith/broken.yaml"),
+            "custom_rules:\n  - id: no-matcher\n    context: [exec]\n    severity: HIGH\n",
+        )
+        .unwrap();
+        run_git(&upstream, &["add", "."]);
+        run_git(&upstream, &["commit", "-q", "-m", "broken tirith rule"]);
+
+        let err = add(&paths, "team", &upstream.to_string_lossy(), None).unwrap_err();
+        assert!(err.contains("tirith validation"), "unexpected error: {err}");
+        assert!(!paths.source_rules_dir("team").exists());
+        assert!(!paths.source_tirith_dir("team").exists());
+        assert_eq!(
+            list(&paths),
+            vec![],
+            "config.toml must not record a rejected source"
+        );
     }
 
     #[test]
@@ -487,7 +817,7 @@ mod tests {
         let paths = scratch_paths("add-opa-passed");
         let upstream = make_upstream("add-opa-passed");
         let outcome = add(&paths, "team", &upstream.to_string_lossy(), None).unwrap();
-        assert_eq!(outcome.rego_check, RegoCheck::Passed);
+        assert_eq!(outcome.content_check, ContentCheck::Passed);
     }
 
     #[test]
@@ -513,7 +843,7 @@ mod tests {
             !paths.source_rules_dir("team").exists(),
             "a source that fails validation must install nothing"
         );
-        assert!(!paths.cupcake_source_custom_dir("team").exists());
+        assert!(!paths.cupcake_source_policies_dir("team").exists());
         assert_eq!(
             list(&paths),
             vec![],
@@ -529,7 +859,7 @@ mod tests {
         ));
         let _ = fs::remove_dir_all(&dir);
         // Deliberately not created: mirrors a source that ships only rules.
-        assert_eq!(check_rego(&dir), Ok(RegoCheck::NotApplicable));
+        assert_eq!(check_rego(&dir), Ok(ContentCheck::NotApplicable));
     }
 
     #[test]
@@ -638,7 +968,7 @@ mod tests {
         assert_eq!(list(&paths), vec![original]);
         assert!(
             !paths
-                .cupcake_source_custom_dir("team")
+                .cupcake_source_policies_dir("team")
                 .join("broken.rego")
                 .exists()
         );
@@ -653,7 +983,7 @@ mod tests {
         assert!(remove(&paths, "team").unwrap());
         assert_eq!(list(&paths), vec![]);
         assert!(!paths.source_rules_dir("team").exists());
-        assert!(!paths.cupcake_source_custom_dir("team").exists());
+        assert!(!paths.cupcake_source_policies_dir("team").exists());
         assert!(!remove(&paths, "team").unwrap(), "already removed");
     }
 }

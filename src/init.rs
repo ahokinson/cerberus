@@ -2,6 +2,7 @@ use crate::embedded;
 use crate::harness::cursor;
 use crate::head::Head;
 use crate::integrations::cupcake;
+use crate::integrations::tirith::compose;
 use crate::paths::Paths;
 use crate::process::command_exists;
 use crate::settings;
@@ -23,9 +24,8 @@ fn write_rule_scripts(rules_dir: &Path) -> io::Result<usize> {
 }
 
 /// Writes cerberus's shipped Rego policies (`embedded::CUPCAKE_POLICIES`)
-/// into `dir` — cupcake's global store's reserved `custom/cerberus/`
-/// subdirectory (see `Paths::cupcake_global_custom_dir`) — creating it if
-/// needed. Same always-overwrite-the-known-files contract as
+/// into `dir` — cerberus's own cupcake store's policy directory (see
+/// `Paths::cupcake_policies_dir`) — creating it if needed. Same always-overwrite-the-known-files contract as
 /// [`write_rule_scripts`]: this is canonical, versioned content, and the
 /// directory is reserved to cerberus alone, so there's never an "unrelated
 /// file" to worry about leaving in place.
@@ -37,12 +37,18 @@ fn write_cupcake_policies(dir: &Path) -> io::Result<usize> {
     Ok(embedded::CUPCAKE_POLICIES.len())
 }
 
-/// Writes cerberus's tirith overlay policy (`embedded::TIRITH_POLICY`) to
-/// `Paths::tirith_overlay_policy_file`, always overwriting: canonical,
-/// versioned content, same as the rule scripts and cupcake policies. Pure
-/// local file I/O — no `tirith` binary needed to write it, only to enforce
-/// it later.
-pub(crate) fn write_tirith_overlay(paths: &Paths) -> io::Result<()> {
+/// Composes cerberus's tirith overlay (base + personal fragments + every
+/// source's, see `integrations::tirith::compose`) and writes it to
+/// `Paths::tirith_overlay_policy_file`, always overwriting: generated
+/// content, same always-refresh contract as the rule scripts and cupcake
+/// policies. Pure local file I/O — no `tirith` binary needed to write it,
+/// only to enforce it later.
+///
+/// Returns the composition result so callers can report how many layers
+/// merged and surface any per-layer problems. Composition itself never
+/// fails; a bad fragment costs only itself.
+pub(crate) fn write_tirith_overlay(paths: &Paths) -> io::Result<compose::Composed> {
+    let composed = compose::overlay(paths);
     let file = paths.tirith_overlay_policy_file();
     if let Some(parent) = file.parent() {
         fs::create_dir_all(parent)?;
@@ -55,7 +61,31 @@ pub(crate) fn write_tirith_overlay(paths: &Paths) -> io::Result<()> {
     if file.symlink_metadata().is_ok() {
         fs::remove_file(&file)?;
     }
-    fs::write(&file, embedded::TIRITH_POLICY)
+    fs::write(&file, &composed.yaml)?;
+    Ok(composed)
+}
+
+/// Creates the directory a user drops their own tirith fragments into. Only
+/// ever created, never written to and never cleaned out: this is the risk
+/// head's counterpart to a personal `.rhai` file in the rules directory, and
+/// `init` has no more business editing one than the other.
+fn ensure_tirith_fragments_dir(paths: &Paths) -> io::Result<()> {
+    fs::create_dir_all(paths.tirith_fragments_dir())
+}
+
+/// Removes the top-level `$XDG_DATA_HOME` directories earlier versions of
+/// cerberus created, now that everything lives under one `cerberus/`
+/// namespace. Returns the ones that were actually there, so the removal is
+/// reported by name rather than done silently — these are cerberus's own
+/// artifacts, but deleting anything on a user's machine should still be
+/// visible in the output.
+fn remove_legacy_dirs(paths: &Paths) -> Vec<String> {
+    paths
+        .legacy_dirs()
+        .into_iter()
+        .filter(|dir| dir.is_dir() && fs::remove_dir_all(dir).is_ok())
+        .map(|dir| dir.display().to_string())
+        .collect()
 }
 
 /// Writes cerberus's shipped Hermes Agent plugin (`embedded::HERMES_PLUGIN`)
@@ -125,7 +155,7 @@ fn ensure_config_file(paths: &Paths) -> io::Result<bool> {
     Ok(true)
 }
 
-enum StubOutcome {
+enum SetupOutcome {
     AlreadyInstalled,
     Created,
     Skipped(String),
@@ -195,80 +225,107 @@ fn ensure_codex_hooks_enabled(config_path: &Path) -> CodexFeatureOutcome {
     }
 }
 
-/// Ensures a cupcake stub project exists at `paths.cupcake_stub()` so the
-/// `policy` head has something to evaluate against. Shells out to `cupcake
-/// init --harness claude` when the binary is available; otherwise reports
-/// why it couldn't, per the fail-open philosophy (report, don't error out).
-fn ensure_cupcake_stub(paths: &Paths) -> StubOutcome {
-    let stub = paths.cupcake_stub();
-    if cupcake::stub_installed(&stub) {
-        return StubOutcome::AlreadyInstalled;
+/// Ensures a cupcake project exists at `paths.cupcake_project_root()` so
+/// the `policy` head has something to evaluate against. Shells out to
+/// `cupcake init --harness claude` when the binary is available; otherwise
+/// reports why it couldn't, per the fail-open philosophy (report, don't
+/// error out).
+///
+/// cerberus's own policies do not live here — they're in the global store
+/// ([`ensure_cupcake_global`]). This project exists because `cupcake eval`
+/// wants one, and it's scaffolded by cupcake rather than by hand so its
+/// `system/` entrypoint always matches the installed cupcake version.
+///
+/// Runs with the same decoy `HOME` as the global init, and cleans up after
+/// it: `cupcake init` also writes a `.claude/settings.json` and an
+/// `.opencode/plugin/` into the project directory, wiring its own hooks
+/// that would double-evaluate cupcake alongside cerberus's. Harmless where
+/// they land (a directory cerberus owns, that no harness reads as a project
+/// root), but there's no reason to keep them.
+fn ensure_cupcake_project(paths: &Paths) -> SetupOutcome {
+    let root = paths.cupcake_project_root();
+    if cupcake::project_installed(&root) {
+        return SetupOutcome::AlreadyInstalled;
     }
     if !command_exists("cupcake") {
-        return StubOutcome::Skipped("cupcake not on PATH".to_string());
+        return SetupOutcome::Skipped("cupcake not on PATH".to_string());
     }
-    if let Err(e) = fs::create_dir_all(&stub) {
-        return StubOutcome::Failed(format!("couldn't create {}: {e}", stub.display()));
+    let decoy_home = paths.cupcake_init_decoy_home();
+    if let Err(e) = fs::create_dir_all(&root).and_then(|()| fs::create_dir_all(&decoy_home)) {
+        return SetupOutcome::Failed(format!("couldn't create {}: {e}", root.display()));
     }
     let status = Command::new("cupcake")
         .args(["init", "--harness", "claude"])
-        .current_dir(&stub)
+        .current_dir(&root)
+        .env("HOME", &decoy_home)
         .status();
     match status {
-        Ok(s) if s.success() && cupcake::stub_installed(&stub) => StubOutcome::Created,
-        Ok(s) => StubOutcome::Failed(format!("cupcake init exited with {s}")),
-        Err(e) => StubOutcome::Failed(format!("failed to run cupcake init: {e}")),
+        Ok(s) if s.success() && cupcake::project_installed(&root) => {
+            let _ = fs::remove_dir_all(root.join(".claude"));
+            let _ = fs::remove_dir_all(root.join(".opencode"));
+            SetupOutcome::Created
+        }
+        Ok(s) => SetupOutcome::Failed(format!("cupcake init exited with {s}")),
+        Err(e) => SetupOutcome::Failed(format!("failed to run cupcake init: {e}")),
     }
 }
 
-/// Ensures cupcake's **global** store exists for the `claude` harness and
-/// that cerberus's own policies are current inside it. Only ever calls
-/// `cupcake init --global` when the global root doesn't already have a
-/// `claude` harness installed — never re-initializes a store a user (or a
-/// different harness) already set up — and only ever writes beneath
-/// `paths.cupcake_global_custom_dir()`, never touching anything else in the
-/// store.
+/// Ensures **cerberus's own** cupcake global store exists for the `claude`
+/// harness and that cerberus's policies are current inside it. Only ever
+/// calls `cupcake init --global` when the store doesn't already have a
+/// `claude` harness installed, and only ever writes beneath
+/// `paths.cupcake_policies_dir()`.
 ///
-/// Runs the `cupcake init --global` subprocess with `HOME` pointed at a
-/// decoy directory and `XDG_CONFIG_HOME` pointed at the real target
-/// (`paths.config_home`, i.e. `cupcake_global_root()`'s parent): confirmed
-/// against the real binary, `cupcake init --global` doesn't just scaffold
-/// the policy tree, it also tries to auto-wire its *own* independent
-/// `PreToolUse` hook (matcher `"*"`, running `cupcake eval` directly) into
-/// `$HOME/.claude/settings.json` on its own initiative. Left unchecked that
-/// would corrupt the single hook slot `settings::install_hooks` owns and
-/// double-evaluate cupcake on every guarded call. The decoy `HOME` has no
-/// `.claude/settings.json` for that probe to find, so it's a no-op there,
-/// while `XDG_CONFIG_HOME` still steers the actual global store to the
-/// right place.
-fn ensure_cupcake_global(paths: &Paths) -> StubOutcome {
+/// This store is cerberus's, not the user's. `XDG_CONFIG_HOME` is pointed
+/// at `paths.cupcake_init_xdg_config_home()` (i.e. `~/.config/cerberus`)
+/// rather than the user's real config home, because cupcake derives its
+/// global root as `$XDG_CONFIG_HOME/cupcake` — so the store lands at
+/// `~/.config/cerberus/cupcake/` and the user's own `~/.config/cupcake` is
+/// never read or written by cerberus at all. `cupcake eval` is then pointed
+/// back at it with `--global-config`.
+///
+/// `HOME` is pointed at a decoy directory for the same reason it always
+/// was, re-confirmed against cupcake 0.5.2: `cupcake init --global` doesn't
+/// just scaffold the policy tree, it also tries to auto-wire its *own*
+/// independent `PreToolUse` hook (matcher `"*"`, running `cupcake eval`
+/// directly) into `$HOME/.claude/settings.json` on its own initiative. Left
+/// unchecked that would corrupt the hook entries `settings::install_hooks`
+/// owns and double-evaluate cupcake on every guarded call. The decoy `HOME`
+/// absorbs that write instead.
+///
+/// Letting cupcake scaffold the store, rather than cerberus writing it from
+/// embedded content, is deliberate: `cupcake init --global` produces
+/// `policies/claude/system/evaluate.rego`, the WASM entrypoint the engine
+/// compiles against. A hand-rolled copy would pin cerberus to one cupcake
+/// version and turn a cupcake upgrade into a silently degraded policy head.
+fn ensure_cupcake_global(paths: &Paths) -> SetupOutcome {
     let root = paths.cupcake_global_root();
     let already_installed = cupcake::global_installed(&root);
     if !already_installed {
         if !command_exists("cupcake") {
-            return StubOutcome::Skipped("cupcake not on PATH".to_string());
+            return SetupOutcome::Skipped("cupcake not on PATH".to_string());
         }
-        let decoy_home = paths.cupcake_global_init_decoy_home();
+        let decoy_home = paths.cupcake_init_decoy_home();
         if let Err(e) = fs::create_dir_all(&decoy_home) {
-            return StubOutcome::Failed(format!("couldn't create {}: {e}", decoy_home.display()));
+            return SetupOutcome::Failed(format!("couldn't create {}: {e}", decoy_home.display()));
         }
         let status = Command::new("cupcake")
             .args(["init", "--global", "--harness", "claude"])
             .env("HOME", &decoy_home)
-            .env("XDG_CONFIG_HOME", &paths.config_home)
+            .env("XDG_CONFIG_HOME", paths.cupcake_init_xdg_config_home())
             .status();
         match status {
             Ok(s) if s.success() && cupcake::global_installed(&root) => {}
-            Ok(s) => return StubOutcome::Failed(format!("cupcake init --global exited with {s}")),
+            Ok(s) => return SetupOutcome::Failed(format!("cupcake init --global exited with {s}")),
             Err(e) => {
-                return StubOutcome::Failed(format!("failed to run cupcake init --global: {e}"));
+                return SetupOutcome::Failed(format!("failed to run cupcake init --global: {e}"));
             }
         }
     }
-    match write_cupcake_policies(&paths.cupcake_global_custom_dir()) {
-        Ok(_) if already_installed => StubOutcome::AlreadyInstalled,
-        Ok(_) => StubOutcome::Created,
-        Err(e) => StubOutcome::Failed(format!("couldn't write cerberus's cupcake policies: {e}")),
+    match write_cupcake_policies(&paths.cupcake_policies_dir()) {
+        Ok(_) if already_installed => SetupOutcome::AlreadyInstalled,
+        Ok(_) => SetupOutcome::Created,
+        Err(e) => SetupOutcome::Failed(format!("couldn't write cerberus's cupcake policies: {e}")),
     }
 }
 
@@ -277,7 +334,8 @@ fn yes_no(b: bool) -> &'static str {
 }
 
 /// Bootstraps everything cerberus needs: writes the rule scripts, seeds a
-/// default `config.toml`, ensures the cupcake stub project exists, and
+/// default `config.toml`, ensures cerberus's cupcake project and policy
+/// store exist, composes the tirith overlay, and
 /// wires `cerberus guard`/`cerberus health` into whichever harnesses are
 /// actually present (Claude Code, Codex CLI, Cursor, Hermes, opencode),
 /// each behind its own detection check. Running `init` on a machine
@@ -349,32 +407,32 @@ pub fn run(paths: &Paths) -> i32 {
         ));
     }
 
-    let stub_outcome = ensure_cupcake_stub(paths);
-    let cupcake_stub_ready = matches!(
-        stub_outcome,
-        StubOutcome::AlreadyInstalled | StubOutcome::Created
+    let project_outcome = ensure_cupcake_project(paths);
+    let cupcake_project_ready = matches!(
+        project_outcome,
+        SetupOutcome::AlreadyInstalled | SetupOutcome::Created
     );
-    match stub_outcome {
-        StubOutcome::AlreadyInstalled => println!(
-            "cupcake stub: already installed at {}",
-            paths.cupcake_stub().display()
+    match project_outcome {
+        SetupOutcome::AlreadyInstalled => println!(
+            "cupcake project: already installed at {}",
+            paths.cupcake_project_root().display()
         ),
-        StubOutcome::Created => println!(
-            "cupcake stub: created at {}",
-            paths.cupcake_stub().display()
+        SetupOutcome::Created => println!(
+            "cupcake project: created at {}",
+            paths.cupcake_project_root().display()
         ),
-        StubOutcome::Skipped(reason) => {
-            problems.push(format!("cupcake stub not created: {reason}"))
+        SetupOutcome::Skipped(reason) => {
+            problems.push(format!("cupcake project not created: {reason}"))
         }
-        StubOutcome::Failed(reason) => {
-            problems.push(format!("cupcake stub setup failed: {reason}"))
+        SetupOutcome::Failed(reason) => {
+            problems.push(format!("cupcake project setup failed: {reason}"))
         }
     }
 
     let global_outcome = ensure_cupcake_global(paths);
     let cupcake_global_ready = matches!(
         global_outcome,
-        StubOutcome::AlreadyInstalled | StubOutcome::Created
+        SetupOutcome::AlreadyInstalled | SetupOutcome::Created
     );
     let cupcake_policies_installed = if cupcake_global_ready {
         embedded::CUPCAKE_POLICIES.len()
@@ -382,30 +440,49 @@ pub fn run(paths: &Paths) -> i32 {
         0
     };
     match global_outcome {
-        StubOutcome::AlreadyInstalled => println!(
-            "cupcake global store: cerberus's {} polic(ies) refreshed at {}",
+        SetupOutcome::AlreadyInstalled => println!(
+            "cupcake store: cerberus's {} polic(ies) refreshed at {}",
             cupcake_policies_installed,
-            paths.cupcake_global_custom_dir().display()
+            paths.cupcake_policies_dir().display()
         ),
-        StubOutcome::Created => println!(
-            "cupcake global store: created at {}, cerberus's {} polic(ies) installed",
+        SetupOutcome::Created => println!(
+            "cupcake store: created at {}, cerberus's {} polic(ies) installed",
             paths.cupcake_global_root().display(),
             cupcake_policies_installed
         ),
-        StubOutcome::Skipped(reason) => {
-            problems.push(format!("cupcake global store not created: {reason}"))
+        SetupOutcome::Skipped(reason) => {
+            problems.push(format!("cupcake store not created: {reason}"))
         }
-        StubOutcome::Failed(reason) => {
-            problems.push(format!("cupcake global store setup failed: {reason}"))
+        SetupOutcome::Failed(reason) => {
+            problems.push(format!("cupcake store setup failed: {reason}"))
         }
     }
 
+    match ensure_tirith_fragments_dir(paths) {
+        Ok(()) => println!(
+            "tirith fragments: drop your own *.yaml rules in {}",
+            paths.tirith_fragments_dir().display()
+        ),
+        Err(e) => problems.push(format!(
+            "couldn't create {}: {e}",
+            paths.tirith_fragments_dir().display()
+        )),
+    }
+
+    let mut tirith_rule_count = 0;
     let tirith_overlay_written = match write_tirith_overlay(paths) {
-        Ok(()) => {
+        Ok(composed) => {
+            tirith_rule_count = composed.rule_count;
             println!(
-                "tirith overlay: wrote {}",
+                "tirith overlay: composed {} rule(s) from cerberus's base + {} layer(s) into {}",
+                composed.rule_count,
+                composed.layers_merged,
                 paths.tirith_overlay_policy_file().display()
             );
+            // A bad fragment costs only itself — the base still enforces, so
+            // `health`'s canary still passes. Report it here, where it can be
+            // fixed, rather than degrading the whole guard over it.
+            problems.extend(composed.problems);
             true
         }
         Err(e) => {
@@ -556,20 +633,25 @@ pub fn run(paths: &Paths) -> i32 {
         println!("opencode: not on PATH, skipping plugin install");
     }
 
+    let removed = remove_legacy_dirs(paths);
+    for dir in &removed {
+        println!("migration: removed cerberus's former {dir}");
+    }
+
     println!("\nper-head status:");
     println!(
-        "  {:<10} ({:<24}) — tirith on PATH: {}, overlay written: {}",
+        "  {:<10} ({:<24}) — tirith on PATH: {}, overlay written: {}, {tirith_rule_count} rule(s) composed",
         Head::Risk.name(),
         Head::Risk.purpose(),
         yes_no(tirith_on_path),
         yes_no(tirith_overlay_written)
     );
     println!(
-        "  {:<10} ({:<24}) — cupcake stub ready: {}, opa on PATH: {}, global store ready: {}, \
-        custom cerberus policies installed: {cupcake_policies_installed}",
+        "  {:<10} ({:<24}) — cupcake project ready: {}, opa on PATH: {}, store ready: {}, \
+        cerberus policies installed: {cupcake_policies_installed}",
         Head::Policy.name(),
         Head::Policy.purpose(),
-        yes_no(cupcake_stub_ready),
+        yes_no(cupcake_project_ready),
         yes_no(opa_on_path),
         yes_no(cupcake_global_ready)
     );
@@ -833,13 +915,45 @@ mod tests {
         fs::remove_dir_all(paths.config_home.parent().unwrap()).ok();
     }
 
+    /// With no fragments and no sources, the composed overlay still has to
+    /// carry cerberus's own rule and its own posture — that's what nearly
+    /// every machine running this gets.
     #[test]
-    fn write_tirith_overlay_writes_the_shipped_policy() {
+    fn write_tirith_overlay_writes_cerberus_own_rule_when_there_is_nothing_to_merge() {
         let paths = scratch_paths("tirith-overlay");
-        write_tirith_overlay(&paths).unwrap();
-        assert_eq!(
-            fs::read_to_string(paths.tirith_overlay_policy_file()).unwrap(),
-            embedded::TIRITH_POLICY
+        let composed = write_tirith_overlay(&paths).unwrap();
+        assert_eq!(composed.layers_merged, 0);
+        assert_eq!(composed.rule_count, 1);
+        assert!(composed.problems.is_empty(), "{:?}", composed.problems);
+
+        let written = fs::read_to_string(paths.tirith_overlay_policy_file()).unwrap();
+        assert!(written.contains("cerberus-guard-self-tamper"), "{written}");
+        assert!(written.contains("GENERATED BY cerberus"), "{written}");
+        fs::remove_dir_all(paths.data_home.parent().unwrap()).ok();
+    }
+
+    /// The whole point of the fragments directory: a file dropped there
+    /// reaches the single policy tirith reads, without a rebuild and without
+    /// touching cerberus's own content.
+    #[test]
+    fn write_tirith_overlay_merges_a_personal_fragment() {
+        let paths = scratch_paths("tirith-overlay-fragment");
+        fs::create_dir_all(paths.tirith_fragments_dir()).unwrap();
+        fs::write(
+            paths.tirith_fragments_dir().join("mine.yaml"),
+            "custom_rules:\n  - id: my-own-rule\n    context: [exec]\n    pattern: 'zzz'\n",
+        )
+        .unwrap();
+
+        let composed = write_tirith_overlay(&paths).unwrap();
+        assert_eq!(composed.layers_merged, 1);
+        assert_eq!(composed.rule_count, 2);
+
+        let written = fs::read_to_string(paths.tirith_overlay_policy_file()).unwrap();
+        assert!(written.contains("my-own-rule"), "{written}");
+        assert!(
+            written.contains("cerberus-guard-self-tamper"),
+            "a fragment must add to cerberus's rules, not replace them: {written}"
         );
         fs::remove_dir_all(paths.data_home.parent().unwrap()).ok();
     }
