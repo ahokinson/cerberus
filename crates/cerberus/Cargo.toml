@@ -20,7 +20,7 @@ serde_json = { version = "1.0.151", features = ["preserve_order"] }
 serde_norway = "0.9.42"
 tokio = { version = "1.53.1", features = ["rt", "time"] }
 toml = "1.1.4"
-turso = "0.8.0-pre.8"
+turso = { version = "0.8.0-pre.8", default-features = false, features = ["mimalloc"] }
 
 [lints.rust]
 unexpected_cfgs = { level = "warn", check-cfg = ["cfg(fuzzing)", "cfg(coverage)"] }
