@@ -243,3 +243,75 @@ fn guard_counts_a_deny_per_session_and_violations_prints_it() {
     let other = sb.run(&["violations", "never-seen"]);
     assert_eq!(stdout(&other), "risk=0\npolicy=0\njudgement=0\n");
 }
+
+#[test]
+fn decisions_names_the_rule_file_and_drills_down_to_its_calls() {
+    let sb = Sandbox::new("drill");
+    let config = sb.root.join("config/cerberus/config.toml");
+    let rules = sb.root.join("config/cerberus/rules");
+    fs::create_dir_all(&rules).unwrap();
+    fs::write(&config, "[audit]\nenabled = true\n").unwrap();
+    fs::write(
+        rules.join("tripwire.rhai"),
+        r#"fn check(cmd, cwd, input) { if cmd.contains("boom") { "Blocked (T-001): boom" } }"#,
+    )
+    .unwrap();
+    let deny = r#"{"session_id":"s1","cwd":"/work","tool_name":"Bash","tool_input":{"command":"boom   now"}}"#;
+    sb.run_with_stdin(&["guard"], deny);
+
+    let report = stdout(&sb.run(&["audit", "decisions"]));
+    assert!(report.contains("rule T-001: 1 blocked"), "{report}");
+    assert!(report.contains("tripwire.rhai"), "{report}");
+
+    let rows = stdout(&sb.run(&["audit", "decisions", "T-001"]));
+    assert!(rows.contains("1 blocked by T-001"), "{rows}");
+    assert!(rows.contains("s1  /work  boom now"), "{rows}");
+    assert!(stdout(&sb.run(&["audit", "decisions", "NOPE-9"])).contains("no blocked calls"));
+
+    assert!(stdout(&sb.run(&["audit", "decisions", "--since", "1h"])).contains("1 blocked"));
+    let bad = sb.run(&["audit", "decisions", "--since", "soon"]);
+    assert_eq!(bad.status.code(), Some(1));
+}
+
+#[test]
+fn allows_and_rules_surveys_read_the_record() {
+    let sb = Sandbox::new("survey");
+    let config = sb.root.join("config/cerberus/config.toml");
+    let rules = sb.root.join("config/cerberus/rules");
+    fs::create_dir_all(&rules).unwrap();
+    fs::write(&config, "[audit]\nenabled = true\n").unwrap();
+    fs::write(
+        rules.join("tripwire.rhai"),
+        r#"fn check(cmd, cwd, input) { if cmd.contains("boom") { "Blocked (T-001): boom" } }
+// "(T-002)" is declared here but never fires"#,
+    )
+    .unwrap();
+
+    let call = |command: &str| {
+        let payload = format!(
+            r#"{{"session_id":"s1","cwd":"/work","tool_name":"Bash","tool_input":{{"command":"{command}"}}}}"#
+        );
+        sb.run_with_stdin(&["guard"], &payload);
+    };
+    for _ in 0..21 {
+        call("curl https://example.com");
+    }
+    call("boom");
+
+    let allows = stdout(&sb.run(&["audit", "allows"]));
+    assert!(allows.contains("21 allowed"), "{allows}");
+    assert!(allows.contains("curl: 21 allowed"), "{allows}");
+    assert!(
+        allows.contains("the record isn't older than the window"),
+        "{allows}"
+    );
+    assert!(allows.contains("Bash: 21 allowed, 1 blocked"), "{allows}");
+
+    let rules_out = stdout(&sb.run(&["audit", "rules"]));
+    assert!(rules_out.contains("T-001: 1 times"), "{rules_out}");
+    let silent = rules_out.split("never fired:").nth(1).unwrap();
+    assert!(
+        silent.contains("T-002") && !silent.contains("T-001"),
+        "{rules_out}"
+    );
+}

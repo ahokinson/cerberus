@@ -63,11 +63,38 @@ pub enum AuditCommand {
     },
     /// Group decisions by rule and command shape to guide tightening or loosening
     ///
-    /// Reads the whole log. Lists the rules that block most, then rules that
-    /// block one command shape repeatedly across sessions (candidates to
-    /// loosen), then shapes that are blocked in some forms but still allowed
-    /// often (candidates to tighten). Needs `[audit] enabled = true`.
-    Decisions,
+    /// Lists the rules that block most, with the file that defines each, then
+    /// rules that block one command shape repeatedly across sessions
+    /// (candidates to loosen), then shapes that are blocked in some forms but
+    /// still allowed often (candidates to tighten). Give a rule id to see the
+    /// calls it actually stopped, newest first. Needs `[audit] enabled = true`.
+    Decisions {
+        /// A rule id from the report, e.g. SANDBOX-001, to list its blocked calls
+        rule: Option<String>,
+        /// Only look this far back, e.g. "7d", "12h" (default: everything kept)
+        #[arg(long)]
+        since: Option<String>,
+    },
+    /// Survey what was allowed: unguarded, new, spread out, or outside a project
+    ///
+    /// Reads the counters kept for every allowed call. Lists common shell
+    /// commands no rule has ever stopped, commands first seen recently
+    /// (the last 7 days unless --since says otherwise), commands run from
+    /// many directories or from $HOME or a system directory, and how often
+    /// each tool ran, flagging tools that were never blocked. Needs
+    /// `[audit] enabled = true`.
+    Allows {
+        /// Only count this far back, e.g. "7d", "12h" (default: everything kept)
+        #[arg(long)]
+        since: Option<String>,
+    },
+    /// List every rule with how often it fired, and which never have
+    ///
+    /// Reads the rule scripts, policies and tirith fragments on disk and
+    /// compares them to the deny record, so a rule that never fires stands
+    /// out, as does one that fires constantly. Prints how many days the
+    /// record covers, since "never fired" means little over a short span.
+    Rules,
     /// Export the full audit log
     Export {
         #[arg(long, value_enum, default_value_t = ExportFormat::Json)]

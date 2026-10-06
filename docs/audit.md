@@ -32,7 +32,59 @@ cerberus audit export --format csv --out blocked-this-week.csv
 rule. It groups the record by rule and by command shape, then calls out rules
 that keep blocking one shape across several sessions (likely too tight) and
 shapes that are blocked in some forms but still allowed often (likely too
-loose).
+loose). Each rule line names the file that defines it, when it has one.
+`--since 7d` narrows everything to a recent window.
+
+Give it a rule id from the report to see what that rule actually stopped,
+newest first, with the session, directory and command:
+
+```sh
+cerberus audit decisions SANDBOX-001
+```
+
+That's usually what settles it: the same harmless command over and over means
+loosen the rule, a real attempt means leave it alone.
+
+## Looking past what was blocked
+
+Two more commands read the same record for what the blocks don't show.
+
+`cerberus audit allows` surveys the allow counters:
+
+- **Never blocked, but common:** shell commands allowed often (20 or more
+  times) that no rule has ever stopped. A frequent `curl` or `ssh` here is a
+  rule you don't have.
+- **New commands:** shapes first seen in the window (the last 7 days unless
+  `--since` says otherwise). It says so, rather than listing everything, when
+  the record isn't older than the window.
+- **Run from many directories**, and **run outside any project** (from
+  `$HOME` itself or a system directory like `/etc`).
+- **Tools:** how often each tool ran, with its blocked count, flagging any
+  tool that has never been blocked. This is where an MCP tool running
+  constantly with no rule on it shows up.
+
+`cerberus audit rules` lists every rule found in your rule scripts, cerberus
+policies and tirith fragments (sources included) with how often it fired and
+when it last did, then the ones that never have. It also says how many days
+the record covers, because a rule that hasn't fired in two days tells you
+nothing. A rule that fired but has no file, such as one of tirith's built-ins,
+is listed as such.
+
+Both only work from shapes: an allow keeps no arguments, so they can say
+*what kind* of command ran unchecked, not what it was.
+
+## Querying the database directly
+
+The file is plain SQLite as far as readers go (checked with Python's
+`sqlite3`), so anything can open it read-only. Tables: `decisions` (one row per
+deny/ask), `allows` (per-day counts by `tool_name`, `shape`, `cwd`) and
+`violations` (per-session counts by head).
+
+```sh
+DB=${XDG_STATE_HOME:-$HOME/.local/state}/cerberus/cerberus.db
+sqlite3 "file:$DB?mode=ro" "select rule, count(*) from decisions group by rule order by 2 desc"
+sqlite3 "file:$DB?mode=ro" "select shape, sum(n) from allows group by shape order by 2 desc limit 20"
+```
 
 Every `cerberus guard` call is its own process and the database allows one
 process at a time, so concurrent calls wait briefly for each other. If a write

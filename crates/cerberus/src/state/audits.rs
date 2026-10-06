@@ -164,7 +164,7 @@ pub fn parse_duration(input: &str) -> Option<u64> {
     }
 }
 
-fn looks_like_rule_id(s: &str) -> bool {
+pub(super) fn looks_like_rule_id(s: &str) -> bool {
     !s.is_empty()
         && s.contains('-')
         && s.chars()
@@ -228,7 +228,7 @@ pub fn summarize(records: &[AuditRecord], since_ts: u64) -> Summary {
 
 /// The record's rule id: the stored one, else recovered from the reason for
 /// records written before `rule` existed.
-fn record_rule(record: &AuditRecord) -> Option<String> {
+pub(super) fn record_rule(record: &AuditRecord) -> Option<String> {
     record
         .rule
         .clone()
@@ -271,6 +271,104 @@ pub struct Report {
     pub shapes: Vec<ShapeStat>,
     pub loosen: Vec<String>,
     pub tighten: Vec<String>,
+}
+
+/// Longest command text shown per row by [`describe`].
+const DESCRIBE_MAX_CHARS: usize = 160;
+
+/// The deny/ask rows for one rule, newest first, from `since_ts` on. This is
+/// the drill-down behind `cerberus audit decisions <rule>`: the report names
+/// a rule, this shows the calls it actually stopped.
+pub fn for_rule<'a>(records: &'a [AuditRecord], rule: &str, since_ts: u64) -> Vec<&'a AuditRecord> {
+    let mut rows: Vec<&AuditRecord> = records
+        .iter()
+        .filter(|r| r.ts >= since_ts && record_rule(r).as_deref() == Some(rule))
+        .collect();
+    rows.sort_by_key(|r| std::cmp::Reverse(r.ts));
+    rows
+}
+
+/// What a row stopped, on one line: the Bash command, else the tool input as
+/// compact JSON, cut to [`DESCRIBE_MAX_CHARS`].
+pub fn describe(record: &AuditRecord) -> String {
+    let text = record
+        .tool_input
+        .get("command")
+        .and_then(Value::as_str)
+        .map(String::from)
+        .unwrap_or_else(|| record.tool_input.to_string());
+    let one_line = text.split_whitespace().collect::<Vec<_>>().join(" ");
+    match one_line.char_indices().nth(DESCRIBE_MAX_CHARS) {
+        Some((cut, _)) => format!("{}…", &one_line[..cut]),
+        None => one_line,
+    }
+}
+
+/// `"5m ago"`, `"3h ago"`, `"2d ago"`: how long before `now` a record is.
+pub fn ago(now: u64, ts: u64) -> String {
+    let secs = now.saturating_sub(ts);
+    match secs {
+        0..=59 => format!("{secs}s ago"),
+        60..=3599 => format!("{}m ago", secs / 60),
+        3600..=86399 => format!("{}h ago", secs / 3600),
+        _ => format!("{}d ago", secs / 86400),
+    }
+}
+
+/// How deep [`rule_source`] looks under each rule directory.
+const SOURCE_SEARCH_DEPTH: usize = 4;
+
+fn is_id_char(c: char) -> bool {
+    c.is_ascii_alphanumeric() || c == '_' || c == '-'
+}
+
+/// True if `id` appears in `text` as a whole token, so `GIT-001` doesn't
+/// match inside `GIT-0010`.
+fn contains_token(text: &str, id: &str) -> bool {
+    text.match_indices(id).any(|(start, _)| {
+        let before = text[..start].chars().next_back();
+        let after = text[start + id.len()..].chars().next();
+        !before.is_some_and(is_id_char) && !after.is_some_and(is_id_char)
+    })
+}
+
+fn find_in(dir: &Path, id: &str, depth: usize) -> Option<std::path::PathBuf> {
+    let mut entries: Vec<_> = fs::read_dir(dir)
+        .ok()?
+        .flatten()
+        .map(|e| e.path())
+        .collect();
+    entries.sort();
+    for path in entries {
+        if path.is_dir() {
+            if depth > 0
+                && let Some(found) = find_in(&path, id, depth - 1)
+            {
+                return Some(found);
+            }
+        } else if matches!(
+            path.extension().and_then(|e| e.to_str()),
+            Some("rhai" | "rego" | "yaml" | "yml")
+        ) && fs::read_to_string(&path).is_ok_and(|text| contains_token(&text, id))
+        {
+            return Some(path);
+        }
+    }
+    None
+}
+
+/// The file that defines `rule`, so the report can say what to edit: the
+/// first Rhai script, Rego policy or tirith fragment that mentions the id.
+/// `None` for a rule with no file of its own, such as tirith's built-ins or
+/// the shipped self-tamper rule, which lives in the composed overlay.
+pub fn rule_source(paths: &Paths, rule: &str) -> Option<std::path::PathBuf> {
+    [
+        paths.rule_scripts_dir(),
+        paths.cupcake_policies_dir(),
+        paths.tirith_fragments_dir(),
+    ]
+    .iter()
+    .find_map(|dir| find_in(dir, rule, SOURCE_SEARCH_DEPTH))
 }
 
 pub fn group(records: &[AuditRecord], allows: &[AllowCount], since_ts: u64) -> Report {
@@ -648,6 +746,65 @@ mod tests {
         assert!(report.loosen[0].contains("GIT-001") && report.loosen[0].contains("git push"));
         assert_eq!(report.tighten.len(), 1);
         assert!(report.tighten[0].contains("git push"));
+    }
+
+    #[test]
+    fn for_rule_returns_that_rules_rows_newest_first_within_the_window() {
+        let mut a = sample_record(100, "judgement", "Blocked (A-1): x");
+        a.rule = Some("A-1".into());
+        let mut b = sample_record(300, "judgement", "Blocked (A-1): y");
+        b.rule = Some("A-1".into());
+        let c = sample_record(200, "judgement", "Blocked (B-1): z");
+        let records = vec![a, b, c];
+        let rows = for_rule(&records, "A-1", 0);
+        assert_eq!(
+            rows.iter().map(|r| r.ts).collect::<Vec<_>>(),
+            vec![300, 100]
+        );
+        assert_eq!(for_rule(&records, "A-1", 200).len(), 1);
+        assert!(for_rule(&records, "NOPE-1", 0).is_empty());
+    }
+
+    #[test]
+    fn describe_prefers_the_command_and_truncates() {
+        let mut r = sample_record(1, "risk", "x");
+        r.tool_input = json!({"command": "echo   hi\n there"});
+        assert_eq!(describe(&r), "echo hi there");
+        r.tool_input = json!({"file_path": "/x"});
+        assert_eq!(describe(&r), r#"{"file_path":"/x"}"#);
+        r.tool_input = json!({"command": "a".repeat(500)});
+        assert_eq!(describe(&r).chars().count(), DESCRIBE_MAX_CHARS + 1);
+    }
+
+    #[test]
+    fn ago_picks_a_readable_unit() {
+        assert_eq!(ago(100, 70), "30s ago");
+        assert_eq!(ago(1000, 400), "10m ago");
+        assert_eq!(ago(10_000, 0), "2h ago");
+        assert_eq!(ago(3 * 86400 + 5, 0), "3d ago");
+        assert_eq!(ago(5, 10), "0s ago");
+    }
+
+    #[test]
+    fn rule_source_finds_the_file_that_defines_the_id() {
+        let paths = scratch_paths("source");
+        let rules = paths.rule_scripts_dir();
+        fs::create_dir_all(rules.join("sources/team")).unwrap();
+        fs::write(rules.join("git.rhai"), "\"Blocked (GIT-0010): x\"").unwrap();
+        fs::write(
+            rules.join("sources/team/own.rhai"),
+            "\"Blocked (GIT-001): x\"",
+        )
+        .unwrap();
+        let policies = paths.cupcake_policies_dir();
+        fs::create_dir_all(&policies).unwrap();
+        fs::write(policies.join("pol.rego"), "\"rule_id\": \"CERB-POL-009\"").unwrap();
+
+        let found = rule_source(&paths, "GIT-001").unwrap();
+        assert!(found.ends_with("sources/team/own.rhai"), "{found:?}");
+        let found = rule_source(&paths, "CERB-POL-009").unwrap();
+        assert!(found.ends_with("pol.rego"));
+        assert_eq!(rule_source(&paths, "curl_pipe_shell"), None);
     }
 
     #[test]
