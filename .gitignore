@@ -1,2 +1,5 @@
 /target
+/fuzz/target/
+/coverage/
 /result
+/result-*

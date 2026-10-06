@@ -36,7 +36,7 @@ working is treated as worse than no guard.
 
 ## Layered policy sources are a trust boundary
 
-`cerberus source add`/`sync` (see README's "Layered policy sources") clones
+`cerberus source add`/`sync` (see [Layered policy sources](docs/sources.md)) clones
 and runs a remote repo's `.rhai`/`.rego` content at the same trust level as
 cerberus's own shipped rules — it executes against every guarded tool call,
 the same as the content in this repo. A compromised or malicious source
@@ -60,7 +60,7 @@ only to enforce the `policy` head itself.
 
 ## The audit log persists command text to disk
 
-`[audit] enabled = true` (see README's "Audit log") writes each denied/asked
+`[audit] enabled = true` (see [Audit log](docs/audit.md)) writes each denied/asked
 call's raw `tool_input` — which can include a full Bash command line — to
 `${XDG_STATE_HOME:-$HOME/.local/state}/guard/audit.jsonl` in plaintext.
 Anything typed inline into a guarded command (a bearer token, a database

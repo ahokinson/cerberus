@@ -1,0 +1,22 @@
+[package]
+name = "cerberus-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2024"
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+cerberus = { path = "../crates/cerberus" }
+
+[[bin]]
+name = "hook_event"
+path = "fuzz_targets/hook_event.rs"
+test = false
+doc = false
+bench = false
+
+[workspace]
+members = ["."]

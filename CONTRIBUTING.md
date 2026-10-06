@@ -7,7 +7,7 @@ Branch off `develop`. Before opening a pull request, run everything under
 clean with `-D warnings`, rather than with allowances added.
 
 If you change a rule script, add its behavioral tests in
-`src/rules/engine.rs` in the same change. `shipped_rule_scripts_compile`
+`crates/cerberus/src/heads/judgement/engine.rs` in the same change. `shipped_rule_scripts_compile`
 only proves a script parses, so a rule with no test of its own is a rule
 nobody has checked.
 
@@ -20,11 +20,11 @@ cargo clippy --all-targets -- -D warnings
 cargo fmt
 ```
 
-Install a locally-built binary with `cargo install --path .`, then run
+Install a locally-built binary with `cargo install --path crates/cerberus`, then run
 `cerberus init` to bootstrap the runtime rule scripts, cerberus's cupcake
 project and policy store, the composed tirith overlay, and the
-`~/.claude/settings.json` hook wiring (see the README's Install section).
-It's idempotent, so re-run it after any `cargo install --path .` to pick up
+`~/.claude/settings.json` hook wiring (see docs/installing.md).
+It's idempotent, so re-run it after any `cargo install --path crates/cerberus` to pick up
 rule-script changes.
 
 ## Dependencies
@@ -35,21 +35,21 @@ rule-script changes.
 | `serde` / `serde_json` | The entire hook contract is JSON in, JSON out |
 | `rhai` (`serde` feature) | Embeds the judgement head's rule-script engine; the `serde` feature converts the hook JSON straight to a Rhai `Dynamic` (`rhai::serde::to_dynamic`) so scripts can read any field without a new Rust accessor per field |
 | `toml` | Parses `config.toml` (`config::enabled_heads`) |
-| `serde_norway` | Merges tirith policy fragments (`integrations::tirith::compose`). A maintained fork of `serde_yaml`, which is unmaintained; the merge needs a generic YAML value type, so a real parser beats concatenating `custom_rules:` blocks by hand |
+| `serde_norway` | Merges tirith policy fragments (`heads::risk::compose`). A maintained fork of `serde_yaml`, which is unmaintained; the merge needs a generic YAML value type, so a real parser beats concatenating `custom_rules:` blocks by hand |
 
-There's no crate for shell tokenization. `rules::shell`'s tokenizer is
+There's no crate for shell tokenization. `heads::judgement::shell`'s tokenizer is
 small, security-sensitive, and specific enough (quote-aware plus
 shell-operator splitting, well short of full POSIX parsing) that
 hand-rolling and testing it thoroughly beat pulling in a general-purpose
 shell parser. It's exposed to rule scripts as the native `tokenize()`
-function, as is `rules::git` (the shared git subprocess helpers:
+function, as is `heads::judgement::git` (the shared git subprocess helpers:
 `tree_is_dirty`, `is_ancestor`, `upstream_ref`) via `git_*` functions.
 
 ## Adding a judgement rule
 
 `judgement` runs every `*.rhai` script in `Paths::rule_scripts_dir()`
 (`${XDG_CONFIG_HOME:-$HOME/.config}/cerberus/rules/` at runtime; the
-canonical copies live in this repo's [`rules/`](rules/) directory). To add
+canonical copies live in this repo's [`rules/`](crates/cerberus/rules/) directory). To add
 a rule, drop a `.rhai` file there implementing:
 
 ```rhai
@@ -61,7 +61,7 @@ fn check(cmd, cwd, input) {
 That's enough for a personal rule that only needs to exist on one machine,
 and needs no rebuild. To make a rule part of the canonical shipped set so
 `cerberus init` installs it everywhere, add the file under this repo's
-[`rules/`](rules/) directory *and* list it in `src/embedded.rs`'s `RULES`
+[`rules/`](crates/cerberus/rules/) directory *and* list it in `crates/cerberus/src/embedded.rs`'s `RULES`
 array; scripts are embedded into the binary with `include_str!` at compile
 time rather than read from the checkout at runtime.
 
@@ -69,7 +69,7 @@ time rather than read from the checkout at runtime.
 
 Every shipped rule runs through the `judgement` mechanism, but each one
 still serves one of cerberus's three conceptual purposes (see
-`src/head.rs`), and that should be visible on sight. Start the file with
+`crates/cerberus/src/domain/heads.rs`), and that should be visible on sight. Start the file with
 `// Head: judgement — Purpose: <purpose>`, then a blank comment line, then
 the situational explanation. Picking a purpose:
 
@@ -108,20 +108,20 @@ and handing that to `tokenize` would invent structure that was never there.
 
 Fiddly parsing (tokenizing, walking git's global flags, classifying args)
 stays in Rust and is handed to scripts already structured, so a script only
-ever has to express situational judgement. `src/rules/engine.rs`'s
+ever has to express situational judgement. `crates/cerberus/src/heads/judgement/engine.rs`'s
 `build_engine` registers what's available:
 
 | Function | Wraps |
 | --- | --- |
-| `tokenize(cmd)` | `rules::shell::tokenize` |
+| `tokenize(cmd)` | `heads::judgement::shell::tokenize` |
 | `command_exists(name)` | `crate::process::command_exists` |
-| `tool_paths(input)` | `rules::tool::paths`, every filesystem path the call names, normalized across `file_path`/`notebook_path`/`path` so one rule covers Write, Edit, and NotebookEdit at once |
-| `tool_url(input)` | `rules::tool::url`, the WebFetch URL (empty string stands in for `None`) |
-| `git_is_inside_work_tree(cwd)`, `git_tree_dirty(cwd)`, `git_would_discard(cwd, pathspecs)`, `git_is_ancestor(cwd, a, b)`, `git_ref_exists(cwd, refname)`, `git_ref_exists_as_branch(cwd, name)`, `git_upstream_ref(cwd)`, `git_current_branch(cwd)`, `git_clean_dry_run(cwd, args)` | `rules::git`'s subprocess helpers (empty string stands in for `None`) |
-| `git_invocations(cmd)` | `rules::git::find_git_invocations`, pre-tokenizes and returns `[{subcommand, args, dir}]` so a script never has to walk git's global flags itself. `dir` is `-C`'s value or an earlier `cd` target (empty for neither) |
+| `tool_paths(input)` | `heads::judgement::tool::paths`, every filesystem path the call names, normalized across `file_path`/`notebook_path`/`path` so one rule covers Write, Edit, and NotebookEdit at once |
+| `tool_url(input)` | `heads::judgement::tool::url`, the WebFetch URL (empty string stands in for `None`) |
+| `git_is_inside_work_tree(cwd)`, `git_tree_dirty(cwd)`, `git_would_discard(cwd, pathspecs)`, `git_is_ancestor(cwd, a, b)`, `git_ref_exists(cwd, refname)`, `git_ref_exists_as_branch(cwd, name)`, `git_upstream_ref(cwd)`, `git_current_branch(cwd)`, `git_clean_dry_run(cwd, args)` | `heads::judgement::git`'s subprocess helpers (empty string stands in for `None`) |
+| `git_invocations(cmd)` | `heads::judgement::git::find_git_invocations`, pre-tokenizes and returns `[{subcommand, args, dir}]` so a script never has to walk git's global flags itself. `dir` is `-C`'s value or an earlier `cd` target (empty for neither) |
 | `resolve_dir(base, dir)` | turns an invocation's `dir` into the directory it really runs in; returns `base` unchanged when `dir` is empty |
-| `git_parse_checkout_args(args)` | `rules::git::parse_args`, pre-classifies `checkout`/`switch`/`restore` flags into `{creating, staged, worktree, dashdash, target, pathspecs}` |
-| `kube_context()`, `terraform_workspace(cwd)`, `looks_like_production(name)` | `rules::environment` |
+| `git_parse_checkout_args(args)` | `heads::judgement::git::parse_args`, pre-classifies `checkout`/`switch`/`restore` flags into `{creating, staged, worktree, dashdash, target, pathspecs}` |
+| `kube_context()`, `terraform_workspace(cwd)`, `looks_like_production(name)` | `heads::judgement::environment` |
 
 `rules/git-safety.rhai` is the fullest example.
 
@@ -142,7 +142,7 @@ the tool form — so covering one proves nothing about the other.
 `policy` evaluates cupcake's **global** store, which cupcake itself layers
 on top of each project's own `.cupcake/` policies. The canonical `.rego`
 files cerberus ships live in this repo's
-[`policies/cupcake/`](policies/cupcake/) directory and are installed by
+[`policies/cupcake/`](crates/cerberus/policies/cupcake/) directory and are installed by
 `cerberus init` into `policies/claude/cerberus/` inside **cerberus's own**
 store (`${XDG_CONFIG_HOME:-$HOME/.config}/cerberus/cupcake/`), passed to
 `cupcake eval` via `--global-config`. cerberus never touches the user's own
@@ -156,7 +156,7 @@ policy files in claude harness directory`; note `cupcake verify`/`inspect`
 ignore `--global-config` entirely and cannot be used for this.
 
 To add a rule to the canonical shipped set, add a `.rego` file under
-`policies/cupcake/` *and* list it in `src/embedded.rs`'s
+`policies/cupcake/` *and* list it in `crates/cerberus/src/embedded.rs`'s
 `CUPCAKE_POLICIES` array — the same `include_str!`-at-compile-time pattern
 as the rule scripts.
 
@@ -186,7 +186,7 @@ rule producing `{"rule_id", "reason", "severity"}`.
 `ci-trust-boundary.rego` shows a helper function plus a `some ... in [...]`
 loop over multiple `tool_input` keys.
 
-Validate syntax with `opa check policies/cupcake/<file>.rego`, and run it
+Validate syntax with `opa check crates/cerberus/policies/cupcake/<file>.rego`, and run it
 end-to-end with a real `cupcake eval` before committing — see "Testing
 policy and risk content" below.
 
@@ -195,14 +195,14 @@ policy and risk content" below.
 `risk` scans Bash command strings via tirith, which ships extensive
 built-in detections that apply with zero configuration. cerberus adds an
 overlay on top, applied via `TIRITH_POLICY_ROOT` only in repos with no
-`.tirith/policy.yaml` of their own (`integrations::tirith::has_repo_policy`
+`.tirith/policy.yaml` of their own (`heads::risk::has_repo_policy`
 — a repo or team's own policy always wins).
 
 This section is about the **base layer**,
-`policies/tirith/policy.yaml`, embedded as `src/embedded.rs`'s
+`policies/tirith/policy.yaml`, embedded as `crates/cerberus/src/embedded.rs`'s
 `TIRITH_POLICY`. `cerberus init` doesn't install it verbatim: it composes it
 with the user's own fragments and every source's into one file
-(`src/integrations/tirith/compose.rs`), since tirith has no layering of its
+(`crates/cerberus/src/heads/risk/compose.rs`), since tirith has no layering of its
 own. Changing this file changes the floor every machine gets; see "Writing a
 policy source repo" below for the layer contract.
 
@@ -260,13 +260,13 @@ only takes effect at `HIGH` or `CRITICAL` severity** — `MEDIUM` and below
 always derive an effective `warn` regardless of the declared action, per
 `tirith rule explain --rule <id>`.
 
-Validate syntax with `tirith rule validate --path policies/tirith/policy.yaml`,
+Validate syntax with `tirith rule validate --path crates/cerberus/policies/tirith/policy.yaml`,
 then confirm it actually enforces per the tiering trap above before
 committing.
 
 ## Writing a policy source repo
 
-`cerberus source add <owner/repo|git-url>` (see `src/sources/`) installs an
+`cerberus source add <owner/repo|git-url>` (see `crates/cerberus/src/sources/`) installs an
 *external* repo's content as an additive layer, separate from cerberus's own
 shipped content above. There's no manifest format: a source repo just needs
 any of these three directories at its root, one per head.
@@ -286,7 +286,7 @@ loudly rather than accept silently-dead content.
 
 A source's `.rhai` scripts follow the exact same `check(cmd, cwd, input)`
 contract as [Adding a judgement rule](#adding-a-judgement-rule) above — no
-special casing, since `rules::evaluate` runs a source's directory through
+special casing, since `heads::judgement::evaluate` runs a source's directory through
 the same `engine::evaluate` the top-level rules use. A source's `.rego`
 files should package themselves under
 `cupcake.global.policies.cerberus.sources.<source-name>.<rule-name>` by
@@ -299,7 +299,7 @@ and everything under cerberus's store is already covered by
 
 Each file is a *partial* tirith policy — normally just a `custom_rules:`
 list — merged into the single file tirith reads (see
-`src/integrations/tirith/compose.rs`). Two constraints, both enforced:
+`crates/cerberus/src/heads/risk/compose.rs`). Two constraints, both enforced:
 
 - **You cannot set `fail_mode`, `allow_bypass_env_noninteractive`, or
   `schema_version`.** They come from cerberus's base; declaring one is
@@ -333,10 +333,10 @@ custom_rules:
 ### Validation
 
 `add`/`sync` pin a resolved commit SHA rather than tracking a branch
-live — see [Layered policy sources](README.md#layered-policy-sources) in
-the README for the trust model this is protecting. They also validate
+live — see [Layered policy sources](docs/sources.md) in
+for the trust model this is protecting. They also validate
 fetched content before installing any of it: `.rego` through `opa check`
-(`src/sources/mod.rs`'s `check_rego`), and `tirith/*.yaml` by composing the
+(`crates/cerberus/src/sources/mod.rs`'s `check_rego`), and `tirith/*.yaml` by composing the
 candidate policy and running `tirith rule validate` over the result
 (`check_tirith`). Composing first is the only check worth anything — a
 fragment alone has no `schema_version` for tirith to judge, and what has to
@@ -351,7 +351,7 @@ corresponding head.
 
 ## Testing policy and risk content
 
-`src/integrations/cupcake.rs` and `src/integrations/tirith/` each carry
+`crates/cerberus/src/heads/policy.rs` and `crates/cerberus/src/heads/risk/` each carry
 two tiers of test for the shipped content, gated on `command_exists` so a
 missing binary skips with a message rather than failing the suite:
 
@@ -383,7 +383,7 @@ Add a firing and a non-firing example for any new rule in the same tier.
 
 ## Testing rule scripts
 
-`src/rules/git.rs`, `src/rules/environment.rs`, and `src/rules/shell.rs`
+`crates/cerberus/src/heads/judgement/git.rs`, `crates/cerberus/src/heads/judgement/environment.rs`, and `crates/cerberus/src/heads/judgement/shell.rs`
 test the native functions directly. The
 `find_git_invocations`/`parse_args`/`tree_is_dirty` tests run against a real
 git repo created in a temp directory per test, some with a second local bare
@@ -396,7 +396,7 @@ Temp-dir names include an atomic counter alongside a nanosecond timestamp
 threads scheduled in the same nanosecond window, which caused real flakiness
 once.
 
-`src/rules/engine.rs`'s tests exercise the shipped `.rhai` scripts
+`crates/cerberus/src/heads/judgement/engine.rs`'s tests exercise the shipped `.rhai` scripts
 end-to-end through `engine::evaluate`: fixture git repos for
 `git-safety.rhai`, direct command and JSON checks for
 `sandbox-integrity.rhai`.
