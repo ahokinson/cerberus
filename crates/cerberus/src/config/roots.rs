@@ -36,29 +36,21 @@ impl Paths {
         }
     }
 
-    pub fn violations_file(&self, session_id: &str) -> PathBuf {
-        self.state_home
-            .join("guard")
-            .join(format!("violations-{session_id}.state"))
+    /// cerberus's own runtime state: violation counters, the degraded
+    /// sentinel, and the decision database. Formerly `$XDG_STATE_HOME/guard`.
+    pub fn state_dir(&self) -> PathBuf {
+        self.state_home.join("cerberus")
     }
 
     pub fn degraded_sentinel(&self) -> PathBuf {
-        self.state_home.join("guard").join("degraded")
+        self.state_dir().join("degraded")
     }
 
-    /// The structured audit log (opt-in, see `config::audit_enabled` and
-    /// `src/audit.rs`): one JSONL record per non-allow decision, in the same
-    /// `guard/` directory as the violation counters and degraded sentinel.
-    pub fn audit_log_file(&self) -> PathBuf {
-        self.state_home.join("guard").join("audit.jsonl")
-    }
-
-    /// The single rotated generation of [`Self::audit_log_file`]. Simple
-    /// size-based rotation, one generation: when the live file crosses the
-    /// size threshold it's renamed here (clobbering any prior one) before a
-    /// fresh file is started.
-    pub fn audit_log_rotated_file(&self) -> PathBuf {
-        self.state_home.join("guard").join("audit.jsonl.1")
+    /// cerberus's state database (`state/stores.rs`): per-session violation
+    /// counts always, and, once `config::audit_enabled`, every deny/ask as a
+    /// row with every allow folded into a per-day counter.
+    pub fn database_file(&self) -> PathBuf {
+        self.state_dir().join("cerberus.db")
     }
 
     /// The cupcake *project* root cerberus owns. cupcake needs a project
@@ -175,7 +167,31 @@ impl Paths {
             self.data_home.join("cupcake-stub"),
             self.data_home.join("cerberus-tirith-overlay"),
             self.data_home.join("cupcake-global-init-home"),
+            self.state_home.join("guard"),
         ]
+    }
+
+    /// Files earlier versions left in [`Self::state_dir`]: per-session
+    /// violation counters (now rows in the state database) and the JSONL
+    /// audit log (now the decision tables). Found by name pattern, so only
+    /// those exact shapes are ever listed; `cerberus init` removes them.
+    pub fn legacy_files(&self) -> Vec<PathBuf> {
+        let Ok(entries) = std::fs::read_dir(self.state_dir()) else {
+            return Vec::new();
+        };
+        let mut files: Vec<PathBuf> = entries
+            .flatten()
+            .map(|e| e.path())
+            .filter(|p| {
+                let name = p.file_name().and_then(|n| n.to_str()).unwrap_or("");
+                p.is_file()
+                    && ((name.starts_with("violations-") && name.ends_with(".state"))
+                        || name == "audit.jsonl"
+                        || name == "audit.jsonl.1")
+            })
+            .collect();
+        files.sort();
+        files
     }
 
     /// A decoy `HOME` for the `cupcake init` subprocesses only.

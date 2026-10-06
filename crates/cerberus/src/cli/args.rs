@@ -61,6 +61,13 @@ pub enum AuditCommand {
         #[arg(long, default_value = "7d")]
         since: String,
     },
+    /// Group decisions by rule and command shape to guide tightening or loosening
+    ///
+    /// Reads the whole log. Lists the rules that block most, then rules that
+    /// block one command shape repeatedly across sessions (candidates to
+    /// loosen), then shapes that are blocked in some forms but still allowed
+    /// often (candidates to tighten). Needs `[audit] enabled = true`.
+    Decisions,
     /// Export the full audit log
     Export {
         #[arg(long, value_enum, default_value_t = ExportFormat::Json)]

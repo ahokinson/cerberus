@@ -64,7 +64,11 @@ pub fn run(paths: &Paths) {
     };
     let result = dispatch(&heads, &call);
 
-    if let Some((head, output)) = result {
+    let Some((head, output)) = result else {
+        audit::record_allow(paths, &input);
+        return;
+    };
+    {
         violations::record_if_denied(paths, session_id, head, &output);
         audit::record(paths, head, &input, &output, is_cursor);
         let printed = if is_cursor {

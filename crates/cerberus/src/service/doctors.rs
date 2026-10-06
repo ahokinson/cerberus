@@ -253,7 +253,7 @@ mod tests {
     fn a_failing_run_keeps_the_sentinel_and_a_clean_run_clears_it() {
         let dir = std::env::temp_dir().join(format!("cerberus-doctor-test-{}", std::process::id()));
         let _ = fs::remove_dir_all(&dir);
-        let sentinel = dir.join("guard/degraded");
+        let sentinel = dir.join("cerberus/degraded");
         let sink = &mut std::io::sink();
 
         healths::report(&sentinel, &["boom".to_string()], sink, &mut std::io::sink());

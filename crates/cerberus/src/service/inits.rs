@@ -44,19 +44,23 @@ fn ensure_tirith_fragments_dir(paths: &Paths) -> io::Result<()> {
     fs::create_dir_all(paths.tirith_fragments_dir())
 }
 
-/// Removes the top-level `$XDG_DATA_HOME` directories earlier versions of
-/// cerberus created, now that everything lives under one `cerberus/`
-/// namespace. Returns the ones that were actually there, so the removal is
+/// Removes the directories and files earlier versions of cerberus left
+/// behind (see `Paths::legacy_dirs` and `Paths::legacy_files`), now that
+/// everything lives under one `cerberus/` namespace and its state is in one
+/// database. Returns the ones that were actually there, so the removal is
 /// reported by name rather than done silently — these are cerberus's own
 /// artifacts, but deleting anything on a user's machine should still be
 /// visible in the output.
-fn remove_legacy_dirs(paths: &Paths) -> Vec<String> {
-    paths
+fn remove_legacy(paths: &Paths) -> Vec<String> {
+    let dirs = paths
         .legacy_dirs()
         .into_iter()
-        .filter(|dir| dir.is_dir() && fs::remove_dir_all(dir).is_ok())
-        .map(|dir| dir.display().to_string())
-        .collect()
+        .filter(|dir| dir.is_dir() && fs::remove_dir_all(dir).is_ok());
+    let files = paths
+        .legacy_files()
+        .into_iter()
+        .filter(|file| fs::remove_file(file).is_ok());
+    dirs.chain(files).map(|p| p.display().to_string()).collect()
 }
 
 const DEFAULT_CONFIG_TOML: &str = "\
@@ -72,7 +76,7 @@ judgement = { disabled = false } # contextual bad decisions: Rhai situational ch
 
 # Off by default: enabling this writes a structured record of every deny/ask
 # decision (including the raw command/tool-input text, which can contain
-# inline secrets) to ${XDG_STATE_HOME:-~/.local/state}/guard/audit.jsonl. See
+# inline secrets) to ${XDG_STATE_HOME:-~/.local/state}/cerberus/cerberus.db. See
 # `cerberus audit --help` and SECURITY.md before turning this on.
 [audit]
 enabled = false
@@ -387,7 +391,7 @@ pub fn run(paths: &Paths) -> i32 {
         }
     }
 
-    let removed = remove_legacy_dirs(paths);
+    let removed = remove_legacy(paths);
     for dir in &removed {
         println!("migration: removed cerberus's former {dir}");
     }
@@ -439,6 +443,41 @@ mod tests {
         let dir = temp_dir().join(format!("cerberus-init-test-{}-{name}", std::process::id()));
         let _ = fs::remove_dir_all(&dir);
         dir
+    }
+
+    #[test]
+    fn removes_legacy_state_and_leaves_current_state_alone() {
+        let root = tempdir("legacy");
+        let paths = Paths {
+            state_home: root.join("state"),
+            data_home: root.join("data"),
+            config_home: root.join("config"),
+            cache_home: root.join("cache"),
+            home: root.join("home"),
+        };
+        let state = paths.state_dir();
+        fs::create_dir_all(&state).unwrap();
+        fs::create_dir_all(root.join("state/guard")).unwrap();
+        fs::write(root.join("state/guard/degraded"), "x").unwrap();
+        for name in ["violations-s1.state", "audit.jsonl", "audit.jsonl.1"] {
+            fs::write(state.join(name), "x").unwrap();
+        }
+        for name in ["cerberus.db", "degraded", "violations-notes.txt"] {
+            fs::write(state.join(name), "x").unwrap();
+        }
+
+        let removed = remove_legacy(&paths);
+
+        assert_eq!(removed.len(), 4, "{removed:?}");
+        assert!(!root.join("state/guard").exists());
+        for name in ["violations-s1.state", "audit.jsonl", "audit.jsonl.1"] {
+            assert!(!state.join(name).exists(), "{name} should be gone");
+        }
+        for name in ["cerberus.db", "degraded", "violations-notes.txt"] {
+            assert!(state.join(name).exists(), "{name} must stay");
+        }
+        assert!(remove_legacy(&paths).is_empty(), "second run is a no-op");
+        fs::remove_dir_all(&root).ok();
     }
 
     #[test]

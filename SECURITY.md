@@ -58,11 +58,11 @@ isn't on `$PATH`, validation is skipped with a warning rather than blocking
 the operation — cerberus doesn't require `opa` merely to accept a source,
 only to enforce the `policy` head itself.
 
-## The audit log persists command text to disk
+## The decision record persists command text to disk
 
 `[audit] enabled = true` (see [Audit log](docs/audit.md)) writes each denied/asked
 call's raw `tool_input` — which can include a full Bash command line — to
-`${XDG_STATE_HOME:-$HOME/.local/state}/guard/audit.jsonl` in plaintext.
+`${XDG_STATE_HOME:-$HOME/.local/state}/cerberus/cerberus.db` in plaintext.
 Anything typed inline into a guarded command (a bearer token, a database
 URL with embedded credentials) ends up in that file. It's off by default
 for exactly this reason, is never transmitted anywhere by cerberus itself,

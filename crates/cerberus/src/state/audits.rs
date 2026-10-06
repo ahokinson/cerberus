@@ -1,31 +1,23 @@
+use super::stores::{self, AllowCount};
 use crate::config;
 use crate::config::Paths;
 use crate::domain::Head;
-use crate::domain::{permission_decision, permission_reason, str_field, tool_name};
+use crate::domain::{bash_command, permission_decision, permission_reason, str_field, tool_name};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use std::collections::BTreeMap;
-use std::fs::{self, OpenOptions};
-use std::io::{self, Write};
+use std::collections::{BTreeMap, BTreeSet};
+use std::fs;
+use std::io;
 use std::path::Path;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-const SCHEMA_VERSION: u32 = 1;
-
-/// Rotate the live log out of the way once it crosses this size, rather
-/// than growing it forever. One generation only (see
-/// `Paths::audit_log_rotated_file`) — this is a local debugging/visibility
-/// aid, not a long-term archive.
-const ROTATE_AT_BYTES: u64 = 10 * 1024 * 1024;
-
-/// One line of `audit.jsonl`: everything about a single non-allow decision.
-/// `v` is a schema version so a future format change can tell old and new
-/// records apart. `tool_input` is echoed verbatim from the hook payload
-/// rather than re-normalized per tool, trading a slightly bigger record for
-/// full forensic detail without a per-tool special case here.
+/// One row of the `decisions` table: everything about a single deny or ask.
+/// `tool_input` is echoed verbatim from the hook payload for a deny or
+/// ask, trading a slightly bigger record for full forensic detail without a
+/// per-tool special case here. Allows are never stored as records at all (see
+/// [`record_allow`]).
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
 pub struct AuditRecord {
-    pub v: u32,
     pub ts: u64,
     pub session_id: Option<String>,
     pub head: String,
@@ -34,6 +26,51 @@ pub struct AuditRecord {
     pub reason: Option<String>,
     pub tool_input: Value,
     pub harness: String,
+    pub rule: Option<String>,
+    pub cwd: Option<String>,
+    pub shape: Option<String>,
+}
+
+/// Commands whose first non-flag argument names what they do, so
+/// `git push` and `git log` are different shapes while `ls -la` and `ls` are
+/// not. Anything else collapses to its program name.
+const SUBCOMMAND_PROGRAMS: &[&str] = &[
+    "git",
+    "docker",
+    "npm",
+    "pnpm",
+    "yarn",
+    "cargo",
+    "go",
+    "kubectl",
+    "gh",
+    "nix",
+    "systemctl",
+    "brew",
+    "pip",
+    "helm",
+    "terraform",
+];
+
+/// The coarse "kind" of a call: for Bash, the program (plus subcommand for
+/// the programs in [`SUBCOMMAND_PROGRAMS`]), for any other tool, its name.
+/// Arguments, paths and leading `VAR=value` assignments are dropped, which is
+/// what makes a shape safe to keep for an allow.
+pub fn shape(input: &Value) -> Option<String> {
+    let Some(command) = bash_command(input) else {
+        return tool_name(input).map(String::from);
+    };
+    let mut words = command
+        .split_whitespace()
+        .skip_while(|w| w.contains('=') && !w.starts_with('-'));
+    let program = words.next()?;
+    let program = program.rsplit('/').next().unwrap_or(program);
+    if SUBCOMMAND_PROGRAMS.contains(&program)
+        && let Some(sub) = words.find(|w| !w.starts_with('-'))
+    {
+        return Some(format!("{program} {sub}"));
+    }
+    Some(program.to_string())
 }
 
 /// Seconds since the Unix epoch, `now`. Exposed so `main.rs`'s
@@ -47,7 +84,7 @@ pub fn now_secs() -> u64 {
 }
 
 /// Records one non-allow decision to the audit log, if audit logging is
-/// enabled (`config::audit_enabled`; off by default, see `src/config.rs`).
+/// enabled (`config::audit_enabled`; off by default, see `config/settings.rs`).
 /// A no-op otherwise, and fails silently on any I/O error — a broken audit
 /// write must never affect a guard decision, same contract as
 /// `violations::record`.
@@ -62,56 +99,48 @@ pub fn record(paths: &Paths, head: Head, input: &Value, output: &str, is_cursor:
     if !config::audit_enabled(paths) {
         return;
     }
+    let reason = permission_reason(output);
     let record = AuditRecord {
-        v: SCHEMA_VERSION,
         ts: now_secs(),
         session_id: str_field(input, "session_id").map(String::from),
         head: head.name().to_string(),
         tool_name: tool_name(input).map(String::from),
         decision: permission_decision(output).unwrap_or_default(),
-        reason: permission_reason(output),
+        rule: reason.as_deref().and_then(rule_id),
+        reason,
         tool_input: input.get("tool_input").cloned().unwrap_or(Value::Null),
         harness: if is_cursor { "cursor" } else { "claude" }.to_string(),
+        cwd: str_field(input, "cwd").map(String::from),
+        shape: shape(input),
     };
-    let _ = append(paths, &record);
+    let _ = stores::insert_decision(paths, &record);
 }
 
-fn rotate_if_needed(paths: &Paths) -> io::Result<()> {
-    let path = paths.audit_log_file();
-    if let Ok(meta) = fs::metadata(&path)
-        && meta.len() > ROTATE_AT_BYTES
-    {
-        fs::rename(&path, paths.audit_log_rotated_file())?;
+/// Counts that every enabled head allowed a call. Same contract as
+/// [`record`]: off unless audit is enabled, silent on I/O errors. An allow is
+/// never kept as a record: only a per-day counter of its tool, `shape` and
+/// directory, so no `tool_input` (and nothing a user typed inline) is stored.
+pub fn record_allow(paths: &Paths, input: &Value) {
+    if !config::audit_enabled(paths) {
+        return;
     }
-    Ok(())
+    let _ = stores::bump_allow(
+        paths,
+        now_secs(),
+        tool_name(input),
+        shape(input).as_deref(),
+        str_field(input, "cwd"),
+    );
 }
 
-fn append(paths: &Paths, record: &AuditRecord) -> io::Result<()> {
-    let path = paths.audit_log_file();
-    if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent)?;
-    }
-    rotate_if_needed(paths)?;
-    let line = serde_json::to_string(record).map_err(|e| io::Error::other(format!("{e}")))?;
-    let mut file = OpenOptions::new().create(true).append(true).open(&path)?;
-    writeln!(file, "{line}")
+/// Every stored deny/ask, oldest first.
+pub fn read_records(paths: &Paths) -> stores::Result<Vec<AuditRecord>> {
+    stores::decisions(paths)
 }
 
-/// Reads every record still on disk, rotated generation first, oldest to
-/// newest. A line that fails to parse (partial write, format change) is
-/// skipped rather than failing the whole read.
-pub fn read_records(paths: &Paths) -> Vec<AuditRecord> {
-    let mut records = Vec::new();
-    for path in [paths.audit_log_rotated_file(), paths.audit_log_file()] {
-        let Ok(text) = fs::read_to_string(&path) else {
-            continue;
-        };
-        records.extend(
-            text.lines()
-                .filter_map(|line| serde_json::from_str::<AuditRecord>(line).ok()),
-        );
-    }
-    records
+/// The per-day allow counters, for [`group`].
+pub fn read_allows(paths: &Paths) -> stores::Result<Vec<AllowCount>> {
+    stores::allows(paths)
 }
 
 /// Parses a simple `<n><unit>` duration (`"7d"`, `"12h"`, `"30m"`, `"90s"`)
@@ -148,6 +177,13 @@ fn looks_like_rule_id(s: &str) -> bool {
 /// reason carries one of these two shapes. Returns `None` for a reason with
 /// neither, rather than guessing.
 pub fn rule_id(reason: &str) -> Option<String> {
+    // tirith's ids are lower-case (`curl_pipe_shell`), which the upper-case
+    // convention below would reject, so the risk head tags them explicitly.
+    if let Some(start) = reason.find("(rule: ")
+        && let Some(len) = reason[start + 7..].find(')')
+    {
+        return Some(reason[start + 7..start + 7 + len].to_string());
+    }
     if let Some(start) = reason.find('(')
         && let Some(len) = reason[start + 1..].find(')')
     {
@@ -164,10 +200,9 @@ pub fn rule_id(reason: &str) -> Option<String> {
 
 /// The "N blocked this week, top categories" view `cerberus audit summary`
 /// prints: plain counts grouped a few different ways over an in-process scan
-/// of every record newer than a cutoff. No index or database — expected
-/// volume (only non-allow decisions) is realistically dozens to low hundreds
-/// a week even for an active team, the same "parse the whole flat file into
-/// memory" scale `violations::read_counts` already operates at, one level up.
+/// of every deny/ask row newer than a cutoff. Allows aren't rows (see
+/// `stores`), and denies are realistically dozens to low hundreds a week even
+/// for an active team, so the scan stays small.
 #[derive(Default, Debug, PartialEq)]
 pub struct Summary {
     pub total: usize,
@@ -184,11 +219,134 @@ pub fn summarize(records: &[AuditRecord], since_ts: u64) -> Summary {
         if let Some(tool) = &record.tool_name {
             *summary.by_tool.entry(tool.clone()).or_default() += 1;
         }
-        if let Some(id) = record.reason.as_deref().and_then(rule_id) {
+        if let Some(id) = record_rule(record) {
             *summary.by_rule.entry(id).or_default() += 1;
         }
     }
     summary
+}
+
+/// The record's rule id: the stored one, else recovered from the reason for
+/// records written before `rule` existed.
+fn record_rule(record: &AuditRecord) -> Option<String> {
+    record
+        .rule
+        .clone()
+        .or_else(|| record.reason.as_deref().and_then(rule_id))
+}
+
+/// A rule needs at least this many hits, across at least
+/// [`LOOSEN_MIN_SESSIONS`] sessions, on a single shape before it's called a
+/// loosening candidate: one noisy afternoon isn't a pattern.
+const LOOSEN_MIN_HITS: usize = 5;
+const LOOSEN_MIN_SESSIONS: usize = 3;
+/// A shape that is both allowed and blocked is a tightening candidate once
+/// the allowed side is at least this big.
+const TIGHTEN_MIN_ALLOWS: usize = 5;
+
+#[derive(Default, Debug, PartialEq)]
+pub struct RuleStat {
+    pub rule: String,
+    pub hits: usize,
+    pub asks: usize,
+    pub shapes: BTreeSet<String>,
+    pub sessions: BTreeSet<String>,
+}
+
+#[derive(Default, Debug, PartialEq)]
+pub struct ShapeStat {
+    pub shape: String,
+    pub allows: usize,
+    pub blocks: usize,
+}
+
+/// What `cerberus audit decisions` prints: decisions clustered by rule and by
+/// command shape, with the clusters that suggest a rule is too loose or too
+/// tight called out.
+#[derive(Default, Debug, PartialEq)]
+pub struct Report {
+    pub allows: usize,
+    pub blocks: usize,
+    pub rules: Vec<RuleStat>,
+    pub shapes: Vec<ShapeStat>,
+    pub loosen: Vec<String>,
+    pub tighten: Vec<String>,
+}
+
+pub fn group(records: &[AuditRecord], allows: &[AllowCount], since_ts: u64) -> Report {
+    let mut report = Report::default();
+    let mut rules: BTreeMap<String, RuleStat> = BTreeMap::new();
+    let mut shapes: BTreeMap<String, ShapeStat> = BTreeMap::new();
+    for a in allows.iter().filter(|a| a.day >= since_ts / 86400) {
+        let n = a.n as usize;
+        report.allows += n;
+        let shape = if a.shape.is_empty() { "?" } else { &a.shape };
+        shapes
+            .entry(shape.to_string())
+            .or_insert_with(|| ShapeStat {
+                shape: shape.to_string(),
+                ..Default::default()
+            })
+            .allows += n;
+    }
+    for r in records.iter().filter(|r| r.ts >= since_ts) {
+        report.blocks += 1;
+        let shape = r.shape.clone().unwrap_or_else(|| "?".to_string());
+        let stat = shapes.entry(shape.clone()).or_insert_with(|| ShapeStat {
+            shape: shape.clone(),
+            ..Default::default()
+        });
+        stat.blocks += 1;
+        let rule = record_rule(r).unwrap_or_else(|| format!("({} head, no id)", r.head));
+        let stat = rules.entry(rule.clone()).or_insert_with(|| RuleStat {
+            rule,
+            ..Default::default()
+        });
+        stat.hits += 1;
+        if r.decision == "ask" {
+            stat.asks += 1;
+        }
+        stat.shapes.insert(shape);
+        if let Some(session) = &r.session_id {
+            stat.sessions.insert(session.clone());
+        }
+    }
+
+    for stat in rules.values() {
+        if stat.hits >= LOOSEN_MIN_HITS
+            && stat.sessions.len() >= LOOSEN_MIN_SESSIONS
+            && stat.shapes.len() == 1
+        {
+            let shape = stat.shapes.iter().next().unwrap();
+            let verb = if stat.asks == stat.hits {
+                "asked"
+            } else {
+                "blocked"
+            };
+            report.loosen.push(format!(
+                "{} {verb} {} times, always on `{shape}`, across {} sessions",
+                stat.rule,
+                stat.hits,
+                stat.sessions.len()
+            ));
+        }
+    }
+    for stat in shapes.values() {
+        if stat.blocks > 0 && stat.allows >= TIGHTEN_MIN_ALLOWS {
+            report.tighten.push(format!(
+                "`{}` was blocked {} times but allowed {} times",
+                stat.shape, stat.blocks, stat.allows
+            ));
+        }
+    }
+
+    report.rules = rules.into_values().collect();
+    report.rules.sort_by_key(|a| std::cmp::Reverse(a.hits));
+    report.shapes = shapes.into_values().collect();
+    report
+        .shapes
+        .sort_by_key(|a| std::cmp::Reverse(a.allows + a.blocks));
+    report
 }
 
 pub fn export_json(records: &[AuditRecord]) -> String {
@@ -207,10 +365,11 @@ fn csv_escape(s: &str) -> String {
 /// nested JSON and doesn't fit a spreadsheet cell cleanly) — for full detail
 /// use [`export_json`] instead.
 pub fn export_csv(records: &[AuditRecord]) -> String {
-    let mut out = String::from("ts,session_id,head,tool_name,decision,reason,harness\n");
+    let mut out =
+        String::from("ts,session_id,head,tool_name,decision,reason,harness,rule,cwd,shape\n");
     for r in records {
         out.push_str(&format!(
-            "{},{},{},{},{},{},{}\n",
+            "{},{},{},{},{},{},{},{},{},{}\n",
             r.ts,
             csv_escape(r.session_id.as_deref().unwrap_or("")),
             csv_escape(&r.head),
@@ -218,6 +377,9 @@ pub fn export_csv(records: &[AuditRecord]) -> String {
             csv_escape(&r.decision),
             csv_escape(r.reason.as_deref().unwrap_or("")),
             csv_escape(&r.harness),
+            csv_escape(r.rule.as_deref().unwrap_or("")),
+            csv_escape(r.cwd.as_deref().unwrap_or("")),
+            csv_escape(r.shape.as_deref().unwrap_or("")),
         ));
     }
     out
@@ -255,7 +417,6 @@ mod tests {
 
     fn sample_record(ts: u64, head: &str, reason: &str) -> AuditRecord {
         AuditRecord {
-            v: SCHEMA_VERSION,
             ts,
             session_id: Some("s1".into()),
             head: head.into(),
@@ -264,7 +425,17 @@ mod tests {
             reason: Some(reason.into()),
             tool_input: json!({"command": "rm -rf /"}),
             harness: "claude".into(),
+            rule: None,
+            cwd: None,
+            shape: Some("rm".into()),
         }
+    }
+
+    fn enabled_paths(name: &str) -> Paths {
+        let paths = scratch_paths(name);
+        fs::create_dir_all(paths.config_file().parent().unwrap()).unwrap();
+        fs::write(paths.config_file(), "[audit]\nenabled = true\n").unwrap();
+        paths
     }
 
     #[test]
@@ -273,12 +444,12 @@ mod tests {
         let input = json!({"session_id": "s1", "tool_name": "Bash"});
         let output = r#"{"hookSpecificOutput":{"permissionDecision":"deny","permissionDecisionReason":"nope"}}"#;
         record(&paths, Head::Risk, &input, output, false);
-        assert!(read_records(&paths).is_empty());
-        assert!(!paths.audit_log_file().exists());
+        assert!(read_records(&paths).unwrap().is_empty());
+        assert!(!paths.database_file().exists());
     }
 
     #[test]
-    fn record_appends_a_line_when_enabled() {
+    fn record_stores_a_row_when_enabled() {
         let paths = scratch_paths("enabled");
         fs::create_dir_all(paths.config_file().parent().unwrap()).unwrap();
         fs::write(paths.config_file(), "[audit]\nenabled = true\n").unwrap();
@@ -291,7 +462,7 @@ mod tests {
         let output = r#"{"hookSpecificOutput":{"permissionDecision":"deny","permissionDecisionReason":"Blocked (SANDBOX-001): danger"}}"#;
         record(&paths, Head::Risk, &input, output, false);
 
-        let records = read_records(&paths);
+        let records = read_records(&paths).unwrap();
         assert_eq!(records.len(), 1);
         let r = &records[0];
         assert_eq!(r.head, "risk");
@@ -357,15 +528,133 @@ mod tests {
     }
 
     #[test]
-    fn rotation_moves_the_oversized_file_out_of_the_way() {
-        let paths = scratch_paths("rotate");
-        let path = paths.audit_log_file();
-        fs::create_dir_all(path.parent().unwrap()).unwrap();
-        fs::write(&path, "x".repeat((ROTATE_AT_BYTES + 1) as usize)).unwrap();
+    fn shape_keeps_the_program_and_subcommand_but_no_arguments() {
+        let bash = |c: &str| shape(&json!({"tool_name": "Bash", "tool_input": {"command": c}}));
+        assert_eq!(bash("ls -la /etc"), Some("ls".into()));
+        assert_eq!(bash("/usr/bin/git -C x push --force"), Some("git x".into()));
+        assert_eq!(bash("git push origin main"), Some("git push".into()));
+        assert_eq!(bash("TOKEN=hunter2 cargo test"), Some("cargo test".into()));
+        assert_eq!(
+            shape(&json!({"tool_name": "Write", "tool_input": {"file_path": "/x"}})),
+            Some("Write".into())
+        );
+    }
 
-        rotate_if_needed(&paths).unwrap();
+    #[test]
+    fn record_allow_counts_per_day_and_stores_no_input() {
+        let input = json!({
+            "session_id": "s1", "tool_name": "Bash", "cwd": "/work",
+            "tool_input": {"command": "curl -H 'Authorization: x' https://a"},
+        });
+        let off = scratch_paths("allow-off");
+        record_allow(&off, &input);
+        assert!(!off.database_file().exists());
 
-        assert!(!path.exists());
-        assert!(paths.audit_log_rotated_file().exists());
+        let on = enabled_paths("allow-on");
+        for _ in 0..3 {
+            record_allow(&on, &input);
+        }
+        let allows = read_allows(&on).unwrap();
+        assert_eq!(allows.len(), 1, "same day, tool, shape and cwd is one row");
+        let a = &allows[0];
+        assert_eq!(
+            (a.tool_name.as_str(), a.shape.as_str(), a.cwd.as_str(), a.n),
+            ("Bash", "curl", "/work", 3)
+        );
+        assert!(read_records(&on).unwrap().is_empty());
+        let bytes = fs::read(on.database_file()).unwrap();
+        assert!(
+            !String::from_utf8_lossy(&bytes).contains("Authorization"),
+            "an allow must not leave its input in the database"
+        );
+    }
+
+    #[test]
+    fn deny_records_carry_rule_and_keep_their_input() {
+        let paths = enabled_paths("deny-rule");
+        let input = json!({"tool_name": "Bash", "tool_input": {"command": "rm -rf build"}});
+        let output = r#"{"hookSpecificOutput":{"permissionDecision":"deny","permissionDecisionReason":"Blocked (SANDBOX-001): danger"}}"#;
+        record(&paths, Head::Judgement, &input, output, false);
+        let r = &read_records(&paths).unwrap()[0];
+        assert_eq!(r.rule.as_deref(), Some("SANDBOX-001"));
+        assert_eq!(r.tool_input["command"], "rm -rf build");
+        assert_eq!(r.shape.as_deref(), Some("rm"));
+    }
+
+    #[test]
+    fn writes_prune_rows_past_retention() {
+        let paths = enabled_paths("retention");
+        let mut old = sample_record(1, "risk", "Blocked (X-1): old");
+        old.tool_input = Value::Null;
+        stores::insert_decision(&paths, &old).unwrap();
+        stores::bump_allow(&paths, 1, Some("Bash"), Some("ls"), None).unwrap();
+
+        let fresh = sample_record(now_secs(), "risk", "Blocked (X-1): new");
+        stores::insert_decision(&paths, &fresh).unwrap();
+        stores::bump_allow(&paths, now_secs(), Some("Bash"), Some("ls"), None).unwrap();
+
+        let kept = read_records(&paths).unwrap();
+        assert_eq!(kept.len(), 1);
+        assert_eq!(kept[0].reason.as_deref(), Some("Blocked (X-1): new"));
+        assert_eq!(read_allows(&paths).unwrap().len(), 1);
+    }
+
+    #[test]
+    fn concurrent_writers_all_land() {
+        let paths = std::sync::Arc::new(enabled_paths("concurrent"));
+        let input = json!({"tool_name": "Bash", "cwd": "/w", "tool_input": {"command": "ls"}});
+        std::thread::scope(|scope| {
+            for _ in 0..4 {
+                scope.spawn(|| {
+                    for _ in 0..10 {
+                        record_allow(&paths, &input);
+                    }
+                });
+            }
+        });
+        let total: u64 = read_allows(&paths).unwrap().iter().map(|a| a.n).sum();
+        assert_eq!(total, 40);
+    }
+
+    #[test]
+    fn rule_id_reads_the_tirith_tag() {
+        assert_eq!(
+            rule_id("Blocked by tirith: [HIGH] Pipe (rule: curl_pipe_shell)"),
+            Some("curl_pipe_shell".to_string())
+        );
+    }
+
+    #[test]
+    fn group_flags_a_concentrated_rule_to_loosen_and_a_mixed_shape_to_tighten() {
+        let mut records = Vec::new();
+        for i in 0..5 {
+            let mut r = sample_record(100, "judgement", "Blocked (GIT-001): x");
+            r.session_id = Some(format!("s{i}"));
+            r.shape = Some("git push".into());
+            r.rule = Some("GIT-001".into());
+            records.push(r);
+        }
+        let allows = vec![AllowCount {
+            day: 0,
+            tool_name: "Bash".into(),
+            shape: "git push".into(),
+            cwd: "/w".into(),
+            n: 6,
+        }];
+        let report = group(&records, &allows, 0);
+        assert_eq!((report.allows, report.blocks), (6, 5));
+        assert_eq!(report.rules[0].rule, "GIT-001");
+        assert_eq!(report.loosen.len(), 1);
+        assert!(report.loosen[0].contains("GIT-001") && report.loosen[0].contains("git push"));
+        assert_eq!(report.tighten.len(), 1);
+        assert!(report.tighten[0].contains("git push"));
+    }
+
+    #[test]
+    fn group_stays_quiet_below_the_thresholds() {
+        let records = vec![sample_record(100, "risk", "Blocked (X-1): y")];
+        let report = group(&records, &[], 0);
+        assert!(report.loosen.is_empty() && report.tighten.is_empty());
+        assert_eq!(group(&records, &[], 200).blocks, 0);
     }
 }

@@ -26,7 +26,7 @@ impl Sandbox {
     }
 
     fn sentinel(&self) -> PathBuf {
-        self.root.join("state/guard/degraded")
+        self.root.join("state/cerberus/degraded")
     }
 
     fn plant_sentinel(&self, reason: &str) {
@@ -197,4 +197,49 @@ fn doctor_warns_about_an_unparseable_config_without_degrading_on_it() {
     let checks = value["checks"].as_array().unwrap();
     let config_check = checks.iter().find(|c| c["id"] == "config").unwrap();
     assert_eq!(config_check["status"], "warn");
+}
+
+#[test]
+fn guard_counts_allows_without_their_input_and_decisions_reports_them() {
+    let sb = Sandbox::new("allow-audit");
+    let config = sb.root.join("config/cerberus/config.toml");
+    fs::create_dir_all(config.parent().unwrap()).unwrap();
+    fs::write(&config, "[audit]\nenabled = true\n").unwrap();
+
+    let payload = r#"{"session_id":"s1","cwd":"/work","tool_name":"Bash","tool_input":{"command":"API_KEY=hunter2 ls -la"}}"#;
+    let out = sb.run_with_stdin(&["guard"], payload);
+    assert!(stdout(&out).trim().is_empty(), "an allow prints nothing");
+
+    let db = fs::read(sb.root.join("state/cerberus/cerberus.db")).unwrap();
+    assert!(
+        !String::from_utf8_lossy(&db).contains("hunter2"),
+        "allows must not keep tool_input"
+    );
+
+    let report = sb.run(&["audit", "decisions"]);
+    assert!(report.status.success());
+    assert!(stdout(&report).contains("1 allowed, 0 blocked"));
+}
+
+#[test]
+fn guard_counts_a_deny_per_session_and_violations_prints_it() {
+    let sb = Sandbox::new("violations");
+    let rules = sb.root.join("config/cerberus/rules");
+    fs::create_dir_all(&rules).unwrap();
+    fs::write(
+        rules.join("tripwire.rhai"),
+        r#"fn check(cmd, cwd, input) { if cmd.contains("boom") { "Blocked (T-001): boom" } }"#,
+    )
+    .unwrap();
+
+    let deny = r#"{"session_id":"s1","tool_name":"Bash","tool_input":{"command":"boom"}}"#;
+    for _ in 0..2 {
+        let out = sb.run_with_stdin(&["guard"], deny);
+        assert!(stdout(&out).contains("deny"), "{}", stdout(&out));
+    }
+
+    let counts = sb.run(&["violations", "s1"]);
+    assert_eq!(stdout(&counts), "risk=0\npolicy=0\njudgement=2\n");
+    let other = sb.run(&["violations", "never-seen"]);
+    assert_eq!(stdout(&other), "risk=0\npolicy=0\njudgement=0\n");
 }

@@ -37,7 +37,7 @@ crates/cerberus/
     heads/      risk (tirith), policy (cupcake), judgement (rhai rules)
     harnesses/  claude, codex, cursor, hermes, opencode
     config/     Paths (every runtime location) and config.toml
-    state/      the audit log and per-session deny counts
+    state/      the decision database and per-session deny counts
     sources/    layered policy sources
   tests/        binary-level tests
 fuzz/           cargo-fuzz target

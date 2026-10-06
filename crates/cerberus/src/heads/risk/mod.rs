@@ -17,6 +17,7 @@ pipe-to-shell, homograph URL, terminal injection, data exfiltration). Run \
 
 #[derive(Deserialize, Default)]
 struct Finding {
+    rule_id: Option<String>,
     severity: Option<String>,
     title: Option<String>,
     description: Option<String>,
@@ -135,6 +136,15 @@ fn format_finding(finding: &Finding) -> String {
             segment.push_str(" — ");
             segment.push_str(&normalized);
         }
+    }
+    // The generic id says nothing about which custom rule fired, so prefer
+    // the specific one. Tagged so the audit log can recover it from the reason.
+    if let Some(id) = finding
+        .custom_rule_id
+        .as_deref()
+        .or(finding.rule_id.as_deref())
+    {
+        segment.push_str(&format!(" (rule: {id})"));
     }
     segment
 }
@@ -524,6 +534,7 @@ mod tests {
 
     fn finding(severity: Option<&str>, title: Option<&str>, description: Option<&str>) -> Finding {
         Finding {
+            rule_id: None,
             severity: severity.map(String::from),
             title: title.map(String::from),
             description: description.map(String::from),
@@ -572,6 +583,17 @@ mod tests {
         assert_eq!(
             build_reason(&findings),
             "Blocked by tirith: [HIGH] A | [MEDIUM] B"
+        );
+    }
+
+    #[test]
+    fn finding_is_tagged_with_its_specific_rule_id() {
+        let mut f = finding(Some("HIGH"), Some("T"), None);
+        f.rule_id = Some("custom_rule_match".into());
+        f.custom_rule_id = Some("cerberus-guard-self-tamper".into());
+        assert_eq!(
+            format_finding(&f),
+            "[HIGH] T (rule: cerberus-guard-self-tamper)"
         );
     }
 

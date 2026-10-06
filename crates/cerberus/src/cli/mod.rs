@@ -4,6 +4,7 @@ mod sources;
 
 use crate::config::Paths;
 use crate::service::{doctors, gates, guards, healths, inits};
+use crate::state::violations;
 use args::{AuditCommand, SourceCommand};
 use clap::{Parser, Subcommand};
 
@@ -66,6 +67,15 @@ enum Command {
     /// the tirith overlay, and wires the hook commands into Claude Code's
     /// settings.json. Safe to re-run.
     Init,
+    /// Print a session's deny counts per head
+    ///
+    /// One `head=count` line each for risk, policy and judgement, zero for
+    /// a head that never denied. Counts are kept whether or not auditing is
+    /// enabled. For a statusline or script to read.
+    Violations {
+        /// The session id from the hook event
+        session: String,
+    },
     /// Manage layered policy sources (a team repo, cerberus-examples, ...)
     ///
     /// A source is a named, independently syncable git repo of
@@ -76,11 +86,12 @@ enum Command {
         #[command(subcommand)]
         action: SourceCommand,
     },
-    /// Inspect the structured audit log (off by default; see config.toml)
+    /// Inspect the decision record (off by default; see config.toml)
     ///
-    /// Once `[audit] enabled = true`, every deny/ask decision is recorded
-    /// to ${XDG_STATE_HOME:-~/.local/state}/guard/audit.jsonl. These
-    /// subcommands read that log; they don't change whether it's kept.
+    /// Once `[audit] enabled = true`, every deny/ask decision is recorded,
+    /// and every allow is counted, in
+    /// ${XDG_STATE_HOME:-~/.local/state}/cerberus/cerberus.db. These
+    /// subcommands read it; they don't change whether it's kept.
     Audit {
         #[command(subcommand)]
         action: AuditCommand,
@@ -96,6 +107,16 @@ pub fn run() {
         Command::Health => healths::run(&paths),
         Command::Doctor { json } => std::process::exit(doctors::run(&paths, json)),
         Command::Init => std::process::exit(inits::run(&paths)),
+        Command::Violations { session } => match violations::read_counts(&paths, &session) {
+            Ok(c) => println!(
+                "risk={}\npolicy={}\njudgement={}",
+                c.risk, c.policy, c.judgement
+            ),
+            Err(e) => {
+                eprintln!("couldn't read the state database: {e}");
+                std::process::exit(1);
+            }
+        },
         Command::Source { action } => std::process::exit(sources::run(&paths, action)),
         Command::Audit { action } => std::process::exit(audits::run(&paths, action)),
     }

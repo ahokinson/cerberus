@@ -155,7 +155,7 @@ just `tirith rule test`; see [CONTRIBUTING.md](../CONTRIBUTING.md).
   severity/paranoia filtering. Tirith-side counterpart to CERB-POL-004 —
   this is `health`'s canary for the risk head's overlay content.
 
-Per-session deny counts are written to
-`${XDG_STATE_HOME:-$HOME/.local/state}/guard/violations-<session_id>.state`
-for [pharos](https://github.com/ahokinson/pharos)'s statusline to read,
-keyed by head name (`risk`/`policy`/`judgement`).
+Per-session deny counts are kept in cerberus's state database whether or not
+auditing is on (a count holds no command text). Read them with
+`cerberus violations <session_id>`, which prints `risk=`, `policy=` and
+`judgement=` lines, for a statusline or script to use.

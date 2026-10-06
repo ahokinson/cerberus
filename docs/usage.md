@@ -8,7 +8,8 @@
 | `cerberus gate` | standalone | the fail-closed backstop on its own, for debugging |
 | `cerberus init` | standalone | bootstraps config, rules, and hook wiring |
 | `cerberus source add/remove/list/sync` | standalone | manages layered policy sources — see [Layered policy sources](sources.md) |
-| `cerberus audit tail/summary/export` | standalone | inspects the structured audit log — see [Audit log](audit.md) |
+| `cerberus violations <session>` | standalone | prints a session's deny counts per head |
+| `cerberus audit tail/summary/decisions/export` | standalone | inspects the decision record — see [Audit log](audit.md) |
 
 `guard` reads the Claude Code hook event JSON on stdin once and, on a deny
 or ask, prints the `PreToolUse` hook JSON to stdout:

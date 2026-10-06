@@ -666,7 +666,7 @@ mod tests {
     #[test]
     fn writes_sentinel_and_reports_problems_when_any_exist() {
         let root = tempdir("with-problems");
-        let sentinel = root.join("guard").join("degraded");
+        let sentinel = root.join("cerberus").join("degraded");
         let problems = vec!["tirith (command scanner) not on PATH".to_string()];
         let mut out = Vec::new();
         let mut err = Vec::new();
@@ -700,7 +700,7 @@ mod tests {
     #[test]
     fn clears_a_stale_sentinel_and_prints_nothing_when_no_problems() {
         let root = tempdir("clears-sentinel");
-        let sentinel = root.join("guard").join("degraded");
+        let sentinel = root.join("cerberus").join("degraded");
         fs::create_dir_all(sentinel.parent().unwrap()).unwrap();
         fs::write(&sentinel, "stale reason").unwrap();
 
@@ -717,7 +717,7 @@ mod tests {
     #[test]
     fn joins_multiple_problems_with_a_middle_dot() {
         let root = tempdir("multi-problem");
-        let sentinel = root.join("guard").join("degraded");
+        let sentinel = root.join("cerberus").join("degraded");
         let problems = vec!["a".to_string(), "b".to_string()];
         let mut out = Vec::new();
         let mut err = Vec::new();
