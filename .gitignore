@@ -3,3 +3,6 @@
 /coverage/
 /result
 /result-*
+/dist/
+/node_modules/
+/packages/*/node_modules/

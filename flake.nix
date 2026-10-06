@@ -43,7 +43,7 @@
           default = cerberus;
         });
 
-      # Everything `scripts/check.sh` and `scripts/coverage.sh` need, plus the
+      # Everything `bun run check` and `bun run coverage` need, plus the
       # three binaries the heads shell out to, so the tests that exercise
       # them for real run here instead of skipping.
       devShells = forEachSystem (system:
@@ -52,9 +52,12 @@
         in
         {
           default = pkgs.mkShell {
+            BIOME_BINARY = "${pkgs.biome}/bin/biome";
             LLVM_COV = "${pkgs.llvm}/bin/llvm-cov";
             LLVM_PROFDATA = "${pkgs.llvm}/bin/llvm-profdata";
             packages = [
+              pkgs.biome
+              pkgs.bun
               pkgs.cargo
               pkgs.cargo-llvm-cov
               pkgs.clippy

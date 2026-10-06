@@ -296,6 +296,9 @@ mod tests {
     /// Syntax/shape validation for the shipped overlay: only needs
     /// `tirith`, not a full repo setup beyond what `tirith rule validate`
     /// itself requires.
+    // Runs the real tool, so it's left out of coverage builds, where it would
+    // only skip itself on a runner without it. `cargo test` still runs it.
+    #[cfg(not(coverage))]
     #[test]
     fn shipped_tirith_overlay_validates() {
         if !command_exists("tirith") {
@@ -330,6 +333,9 @@ mod tests {
     /// silently dropping every custom rule — `check_with_overlay` has to
     /// notice that and self-heal, not just check `overlay.is_file()`
     /// (which a symlink to a real file still satisfies).
+    // Runs the real tool, so it's left out of coverage builds, where it would
+    // only skip itself on a runner without it. `cargo test` still runs it.
+    #[cfg(not(coverage))]
     #[test]
     fn check_with_overlay_self_heals_a_symlinked_overlay() {
         if !command_exists("tirith") {
@@ -381,6 +387,9 @@ mod tests {
     /// used to require `overlay.is_file()` before ever trying, which meant
     /// a missing file silently skipped cerberus's own rules forever with
     /// no error and no repair.
+    // Runs the real tool, so it's left out of coverage builds, where it would
+    // only skip itself on a runner without it. `cargo test` still runs it.
+    #[cfg(not(coverage))]
     #[test]
     fn check_with_overlay_self_heals_a_missing_overlay() {
         if !command_exists("tirith") {
@@ -414,6 +423,9 @@ mod tests {
     /// only "fires" under `tirith rule test` can still never fire in
     /// production; see `policies/tirith/policy.yaml`'s header for the full
     /// story and why only one rule ships.
+    // Runs the real tool, so it's left out of coverage builds, where it would
+    // only skip itself on a runner without it. `cargo test` still runs it.
+    #[cfg(not(coverage))]
     #[test]
     fn shipped_tirith_overlay_rule_fires_through_the_real_check_path() {
         if !command_exists("tirith") {
@@ -446,6 +458,9 @@ mod tests {
     /// in production, and `rules_that_never_fire` has to say so — that
     /// distinction is invisible to `tirith rule validate` and is actively
     /// misreported by `tirith rule test`.
+    // Runs the real tool, so it's left out of coverage builds, where it would
+    // only skip itself on a runner without it. `cargo test` still runs it.
+    #[cfg(not(coverage))]
     #[test]
     fn rules_that_never_fire_names_the_rule_that_cannot_escalate() {
         if !command_exists("tirith") {

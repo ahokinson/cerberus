@@ -778,6 +778,9 @@ mod tests {
     /// The tirith counterpart to the `opa check` gate: content tirith
     /// rejects must abort the whole `add`, with nothing installed for any
     /// head and no entry in config.toml.
+    // Runs the real tool, so it's left out of coverage builds, where it would
+    // only skip itself on a runner without it. `cargo test` still runs it.
+    #[cfg(not(coverage))]
     #[test]
     fn add_rejects_a_source_whose_tirith_fragment_tirith_wont_accept() {
         if !command_exists("tirith") {
@@ -807,6 +810,9 @@ mod tests {
         );
     }
 
+    // Runs the real tool, so it's left out of coverage builds, where it would
+    // only skip itself on a runner without it. `cargo test` still runs it.
+    #[cfg(not(coverage))]
     #[test]
     fn add_reports_passed_when_opa_validates_good_rego() {
         if !command_exists("opa") {
@@ -819,6 +825,9 @@ mod tests {
         assert_eq!(outcome.content_check, ContentCheck::Passed);
     }
 
+    // Runs the real tool, so it's left out of coverage builds, where it would
+    // only skip itself on a runner without it. `cargo test` still runs it.
+    #[cfg(not(coverage))]
     #[test]
     fn add_rejects_a_source_with_invalid_rego_and_installs_nothing() {
         if !command_exists("opa") {
@@ -937,6 +946,9 @@ mod tests {
         assert!(after[0].pinned.is_some());
     }
 
+    // Runs the real tool, so it's left out of coverage builds, where it would
+    // only skip itself on a runner without it. `cargo test` still runs it.
+    #[cfg(not(coverage))]
     #[test]
     fn sync_with_apply_rejects_an_update_with_invalid_rego_and_keeps_the_old_pin() {
         if !command_exists("opa") {

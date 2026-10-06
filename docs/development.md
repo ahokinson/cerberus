@@ -1,13 +1,22 @@
 # Development
 
 ```sh
-scripts/check.sh      # rustfmt, Clippy (-D warnings) and the full test suite
-scripts/coverage.sh   # line coverage via cargo-llvm-cov, writes coverage/rust.lcov
+bun install --frozen-lockfile
+bun run check      # Biome, rustfmt, Clippy (-D warnings) and the full test suite
+bun run coverage   # cargo-llvm-cov; fails below 95% of lines or functions
+bun run build      # release layout in dist/ (dist/bin/cerberus)
+bun run format     # Biome and rustfmt, writing
 cargo build
 ```
 
-`nix develop` gives you the toolchain, `cargo-llvm-cov`, and tirith, cupcake
-and opa, so the tests that exercise the real binaries run instead of skipping.
+Bun runs the project's scripts: `package.json` holds the commands, and the
+TypeScript under `scripts/` builds the release layout. Cerberus itself is
+Rust and needs neither at runtime. `packages/` is where a terminal UI would
+live, as a Bun workspace, the way mitos lays out its own; it doesn't exist yet.
+
+`nix develop` gives you the toolchain, Bun, Biome, `cargo-llvm-cov`, and
+tirith, cupcake and opa, so the tests that exercise the real binaries run
+instead of skipping.
 
 All three binaries are vendored in `nix/` as pinned upstream release binaries,
 not taken from an upstream flake or from nixpkgs, so a build doesn't depend on
@@ -65,10 +74,16 @@ or opa skip themselves when the binary is missing.
 
 ## Coverage
 
-`scripts/coverage.sh` needs `cargo-llvm-cov` (`cargo install cargo-llvm-cov
---locked`, or `nix develop`). It only reports by default. Set
-`COVERAGE_MIN_LINES` to fail below a threshold once there's a measured floor
-to hold.
+`bun run coverage` needs `cargo-llvm-cov` (`cargo install cargo-llvm-cov
+--locked`, or `nix develop`) and fails below 95% of lines or functions, the
+same floor mitos holds. It writes `coverage/rust.lcov` for Codecov.
+
+cargo-llvm-cov builds with `cfg(coverage)`. The few tests that run a real
+tirith, cupcake or opa are compiled out of that build
+(`#[cfg(not(coverage))]`): on a runner without those tools they only skip
+themselves, and a skipped body counts as uncovered. What they check is also
+driven against stand-in tools in `tests/commands.rs`, and `cargo test` still
+runs them.
 
 ## Fuzzing
 

@@ -23,4 +23,4 @@ toml = "1.1.4"
 turso = "0.8.0-pre.8"
 
 [lints.rust]
-unexpected_cfgs = { level = "warn", check-cfg = ["cfg(fuzzing)"] }
+unexpected_cfgs = { level = "warn", check-cfg = ["cfg(fuzzing)", "cfg(coverage)"] }

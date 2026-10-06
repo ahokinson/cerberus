@@ -2,6 +2,10 @@
 
 <img src="assets/logo.svg" alt="cerberus logo: three dog heads over a shield" width="200">
 
+[![CI](https://github.com/ahokinson/cerberus/actions/workflows/ci.yml/badge.svg?branch=develop&event=push)](https://github.com/ahokinson/cerberus/actions/workflows/ci.yml)
+[![codecov](https://codecov.io/gh/ahokinson/cerberus/branch/develop/graph/badge.svg)](https://codecov.io/gh/ahokinson/cerberus)
+[![OpenSSF Scorecard](https://api.scorecard.dev/projects/github.com/ahokinson/cerberus/badge)](https://scorecard.dev/viewer/?uri=github.com/ahokinson/cerberus)
+
 A guard for AI agent tool calls, with three heads.
 
 cerberus is a Rust CLI that judges every state-changing tool call before

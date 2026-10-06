@@ -14,6 +14,14 @@ nobody has checked.
 ## Building from source
 
 ```sh
+bun install --frozen-lockfile
+bun run check      # Biome, rustfmt, Clippy (-D warnings), cargo test
+bun run coverage   # 95% of lines and functions
+```
+
+Or the Rust steps directly:
+
+```sh
 cargo build
 cargo test
 cargo clippy --all-targets -- -D warnings

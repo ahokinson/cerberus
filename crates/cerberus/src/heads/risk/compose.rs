@@ -651,6 +651,9 @@ mod tests {
     /// The composed file is what `tirith rule validate` and `tirith check`
     /// are pointed at, so it has to be a policy tirith accepts — not merely
     /// well-formed YAML.
+    // Runs the real tool, so it's left out of coverage builds, where it would
+    // only skip itself on a runner without it. `cargo test` still runs it.
+    #[cfg(not(coverage))]
     #[test]
     fn composed_output_validates_with_the_real_tirith() {
         if !crate::process::command_exists("tirith") {

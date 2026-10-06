@@ -109,6 +109,9 @@ mod tests {
     /// Cheap syntax check for every shipped policy: only needs `opa`, not a
     /// full cupcake project. Complements the end-to-end test below, which
     /// needs `cupcake` too and is far more expensive to run.
+    // Runs the real tool, so it's left out of coverage builds, where it would
+    // only skip itself on a runner without it. `cargo test` still runs it.
+    #[cfg(not(coverage))]
     #[test]
     fn shipped_cupcake_policies_pass_opa_check() {
         if !command_exists("opa") {
@@ -145,6 +148,9 @@ mod tests {
     /// without needing to override `XDG_CONFIG_HOME` for the eval at all.
     /// The decoy `HOME` is still needed for `init`, which auto-wires its own
     /// hook into `$HOME/.claude/settings.json` otherwise.
+    // Runs the real tool, so it's left out of coverage builds, where it would
+    // only skip itself on a runner without it. `cargo test` still runs it.
+    #[cfg(not(coverage))]
     #[test]
     fn shipped_cupcake_policies_evaluate_correctly_end_to_end() {
         if !command_exists("cupcake") || !command_exists("opa") {
