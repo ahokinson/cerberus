@@ -667,15 +667,15 @@ check)
   case "$cmd" in
     fire:*)
       id="${{cmd#fire:}}"
-      echo '{{"findings":[{{"rule_id":"custom_rule_match","custom_rule_id":"'"$id"'","severity":"HIGH","title":"fires"}}],"policy_path_used":"'"$used"'"}}'
+      printf '%s\n' '{{"findings":[{{"rule_id":"custom_rule_match","custom_rule_id":"'"$id"'","severity":"HIGH","title":"fires"}}],"policy_path_used":"'"$used"'"}}'
       exit 1 ;;
     opaque) exit 1 ;;
-    drift) echo '{{"findings":[],"policy_path_used":"/elsewhere/policy.yaml"}}'; exit 0 ;;
+    drift) printf '%s\n' '{{"findings":[],"policy_path_used":"/elsewhere/policy.yaml"}}'; exit 0 ;;
     *danger*|"rm -rf /home/guard-health/.config/cerberus")
-      echo '{{"findings":[{{"rule_id":"curl_pipe_shell","severity":"CRITICAL","title":"Danger","description":"line one\n  line two"}}],"policy_path_used":"'"$used"'"}}'
+      printf '%s\n' '{{"findings":[{{"rule_id":"curl_pipe_shell","severity":"CRITICAL","title":"Danger","description":"line one\n  line two"}}],"policy_path_used":"'"$used"'"}}'
       exit 1 ;;
   esac
-  echo '{{"findings":[],"policy_path_used":"'"$used"'"}}' ;;
+  printf '%s\n' '{{"findings":[],"policy_path_used":"'"$used"'"}}' ;;
 esac"#
         ),
     );
@@ -700,11 +700,11 @@ eval)
   input=$({cat})
   case "$input" in
     *'rm -rf /"'*|*sandbox-integrity.rhai*)
-      echo '{{"hookSpecificOutput":{{"permissionDecision":"deny","permissionDecisionReason":"CERB-POL-004: fake"}}}}' ;;
-    *askme*) echo '{{"hookSpecificOutput":{{"permissionDecision":"ask","permissionDecisionReason":"CERB-POL-002: fake"}}}}' ;;
+      printf '%s\n' '{{"hookSpecificOutput":{{"permissionDecision":"deny","permissionDecisionReason":"CERB-POL-004: fake"}}}}' ;;
+    *askme*) printf '%s\n' '{{"hookSpecificOutput":{{"permissionDecision":"ask","permissionDecisionReason":"CERB-POL-002: fake"}}}}' ;;
     *crash*) exit 1 ;;
     *emptyout*) ;;
-    *) echo '{{"hookSpecificOutput":{{"permissionDecision":"allow"}}}}' ;;
+    *) printf '%s\n' '{{"hookSpecificOutput":{{"permissionDecision":"allow"}}}}' ;;
   esac ;;
 esac"#
         ),
@@ -775,7 +775,7 @@ fn doctor_passes_when_every_canary_is_blocked_and_names_each_one_that_is_not() {
     sb.tool(
         "cupcake",
         &format!(
-            r#"{cat} > /dev/null; echo '{{"hookSpecificOutput":{{"permissionDecision":"allow"}}}}'"#
+            r#"{cat} > /dev/null; printf '%s\n' '{{"hookSpecificOutput":{{"permissionDecision":"allow"}}}}'"#
         ),
     );
     let sick = sb.run(&["doctor"]);
