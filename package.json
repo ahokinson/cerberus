@@ -6,7 +6,7 @@
     "check": "bun run check:ts && cargo fmt --check && bun run lint:rust && cargo test --workspace",
     "check:ts": "biome check scripts",
     "coverage": "bun run coverage:rust",
-    "coverage:rust": "cargo llvm-cov --workspace --fail-under-lines 95 --fail-under-functions 95 --lcov --output-path coverage/rust.lcov && cargo llvm-cov report",
+    "coverage:rust": "mkdir -p coverage && cargo llvm-cov --workspace --fail-under-lines 95 --fail-under-functions 95 --lcov --output-path coverage/rust.lcov && cargo llvm-cov report",
     "format": "biome check --write scripts && cargo fmt",
     "lint:rust": "cargo clippy --workspace --all-targets -- -D warnings"
   },
