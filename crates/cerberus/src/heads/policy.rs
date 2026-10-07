@@ -100,9 +100,14 @@ pub fn evaluate(paths: &Paths, cwd: &Path, raw_input: &str) -> Option<String> {
     // `.cerberus/policies` is, through a project of cerberus's making; if
     // that project is missing the machine's own is used, so a broken repo
     // layer can only ever mean less added, never nothing enforced.
-    let policy_dir = repos::approved(paths, cwd)
+    //
+    // cupcake takes one project, so of the approved repos the call touches
+    // the first that ships `policies/` supplies it.
+    let input: serde_json::Value = serde_json::from_str(raw_input).unwrap_or_default();
+    let policy_dir = repos::approved_for(paths, cwd, &input)
+        .iter()
         .map(|r| paths.cupcake_repo_policy_dir(&r.id))
-        .filter(|dir| dir.join("policies/claude").is_dir())
+        .find(|dir| dir.join("policies/claude").is_dir())
         .unwrap_or_else(|| paths.cupcake_policy_dir());
     let out = spawn_eval(paths, &policy_dir, raw_input)?;
     if wants_to_respond(&out) {

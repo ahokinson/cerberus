@@ -27,12 +27,16 @@
 //! policy, and the judgement and policy heads are deny-only stacks.
 
 use crate::config::{self, Paths, RepoConfig};
+use crate::domain::bash_command;
+use crate::heads::judgement::{shell, tool};
 use crate::heads::{policy, risk};
 use crate::sources::{self, ContentCheck, Installed};
 use std::collections::BTreeMap;
 use std::fs;
 use std::hash::{DefaultHasher, Hash, Hasher};
 use std::path::{Path, PathBuf};
+
+use serde_json::Value;
 
 /// The directory at a repo's root that carries its cerberus content.
 pub const DIR: &str = ".cerberus";
@@ -65,9 +69,63 @@ fn entry(paths: &Paths, root: &Path) -> Option<RepoConfig> {
 }
 
 /// The approval covering `cwd`, if the repo it sits in has one.
+///
+/// Unlike [`find_root`] this looks at every enclosing repo, nearest first, not
+/// just the nearest: `mkdir sub/.git && cd sub` would otherwise make `sub` a
+/// repo of its own and quietly shed the approved repo's rules.
 pub fn approved(paths: &Paths, cwd: &Path) -> Option<Approved> {
-    let root = find_root(cwd)?;
-    entry(paths, &root).map(|r| Approved { id: r.id })
+    let start = cwd.canonicalize().ok()?;
+    start
+        .ancestors()
+        .filter(|dir| dir.join(".git").exists())
+        .find_map(|dir| entry(paths, dir))
+        .map(|r| Approved { id: r.id })
+}
+
+/// Every approval a tool call falls under: the repo `cwd` sits in, then the
+/// repo of each place the call itself points at. A shell that has wandered off
+/// (`cd /tmp`) must not shed a repo's rules for a call that edits a file in
+/// it, so scope follows what the call touches as well as where it runs.
+///
+/// A call points at a place by naming a path (`file_path`, `notebook_path`,
+/// `path`) or, for a command, by a `cd` into it. Other ways a command can
+/// reach a repo (`git -C`, an absolute path as an argument) are not read, so a
+/// Bash call is still scoped mostly by `cwd`.
+///
+/// In order, without repeats; a call touching two approved repos gets both.
+pub fn approved_for(paths: &Paths, cwd: &Path, input: &Value) -> Vec<Approved> {
+    let mut found: Vec<Approved> = Vec::new();
+    let mut consider = |dir: &Path| {
+        // A file about to be created has no directory to look at yet; its
+        // repo is its nearest ancestor that exists.
+        let mut dir = dir;
+        while !dir.exists() {
+            match dir.parent() {
+                Some(parent) => dir = parent,
+                None => return,
+            }
+        }
+        if let Some(repo) = approved(paths, dir)
+            && !found.contains(&repo)
+        {
+            found.push(repo);
+        }
+    };
+
+    consider(cwd);
+    for named in tool::paths(input) {
+        let named = cwd.join(named);
+        consider(named.parent().unwrap_or(&named));
+    }
+    if let Some(cmd) = bash_command(input) {
+        let words = shell::tokenize(cmd);
+        for pair in words.windows(2) {
+            if pair[0] == "cd" && pair[1] != "--" {
+                consider(&cwd.join(&pair[1]));
+            }
+        }
+    }
+    found
 }
 
 /// A directory name for a repo's snapshot, from its root. It only has to be
@@ -86,9 +144,6 @@ pub enum Outcome {
     Approved {
         root: PathBuf,
         installed: Installed,
-        /// Files added, changed or removed against the last approval; every
-        /// file is "added" the first time.
-        changes: Vec<String>,
         content_check: ContentCheck,
         warnings: Vec<String>,
     },
@@ -96,16 +151,63 @@ pub enum Outcome {
     Withdrawn { root: PathBuf },
 }
 
-/// Makes the repo that `cwd` is in match its `.cerberus/`: approves what is
-/// there, or, if the directory is gone, withdraws an earlier approval. One
-/// command for both, so there is nothing to remember beyond `trust`.
+/// A copy of a repo's `.cerberus/` taken for review, validated and diffed
+/// while it sits in cerberus's own data home, so nothing that happens to the
+/// live directory afterwards can change what was checked or what is
+/// approved. Dropping it without [`commit`] discards the copy.
+#[derive(Debug)]
+pub struct Staged {
+    root: PathBuf,
+    id: String,
+    dir: PathBuf,
+    installed: Installed,
+    changes: Vec<String>,
+    review: String,
+    content_check: ContentCheck,
+    warnings: Vec<String>,
+}
+
+impl Staged {
+    /// The full text a human needs to read before approving: every added or
+    /// changed file's content.
+    pub fn review(&self) -> &str {
+        &self.review
+    }
+
+    /// Added/changed/removed lines against the last approval.
+    pub fn changes(&self) -> &[String] {
+        &self.changes
+    }
+}
+
+impl Drop for Staged {
+    fn drop(&mut self) {
+        let _ = fs::remove_dir_all(&self.dir);
+    }
+}
+
+/// What `trust` is about to do, before anything is recorded.
+#[derive(Debug)]
+pub enum Pending {
+    Approve(Box<Staged>),
+    /// The directory is gone: approving means withdrawing the approval.
+    Withdraw {
+        root: PathBuf,
+        repo: RepoConfig,
+    },
+}
+
+/// First half of `trust`: copies the repo's `.cerberus/` into a staging
+/// directory and validates and diffs *that copy*. Nothing is recorded or
+/// enforced yet; [`commit`] does that, so a caller can show the review and
+/// ask first.
 ///
 /// Validation is the sources' own: `opa check` over the Rego, and the
 /// composed tirith policy through `tirith rule validate`, with a failure
 /// aborting before anything is recorded. Layout is held to the same rules too
 /// (`judgements/` and `risks/` flat), so nothing installs that would silently
 /// never run.
-pub fn trust(paths: &Paths, cwd: &Path) -> Result<Outcome, String> {
+pub fn stage(paths: &Paths, cwd: &Path) -> Result<Pending, String> {
     let root = find_root(cwd).ok_or("not inside a git repository")?;
     let existing = entry(paths, &root);
     let live = root.join(DIR);
@@ -113,61 +215,124 @@ pub fn trust(paths: &Paths, cwd: &Path) -> Result<Outcome, String> {
     let live_is_dir = live.symlink_metadata().is_ok_and(|m| m.is_dir());
     if !live_is_dir {
         return match existing {
-            Some(repo) => {
-                withdraw(paths, &repo)?;
-                Ok(Outcome::Withdrawn { root })
-            }
+            Some(repo) => Ok(Pending::Withdraw { root, repo }),
             None => Err(format!("no {DIR}/ directory in {}", root.display())),
         };
     }
 
-    let judgements = live.join("judgements");
-    let risks = live.join("risks");
-    sources::reject_nested(&judgements, "rhai", "judgements").map_err(|e| e.to_string())?;
-    sources::reject_nested(&risks, "yaml", "risks").map_err(|e| e.to_string())?;
-
     let id = existing
         .as_ref()
         .map_or_else(|| new_id(&root), |r| r.id.clone());
-    let rego = sources::check_rego(&live.join("policies"))
+    let dir = paths.repo_snapshot_dir(&id).with_extension("staging");
+    let _ = fs::remove_dir_all(&dir);
+    // From here `staged` owns the copy: dropping it on an early return removes it.
+    let mut staged = Staged {
+        root,
+        id,
+        dir,
+        installed: Installed::default(),
+        changes: Vec::new(),
+        review: String::new(),
+        content_check: ContentCheck::NotApplicable,
+        warnings: Vec::new(),
+    };
+    let copy = |from: &str, ext: &str| {
+        sources::install_matching_ext(&live.join(from), &staged.dir.join(from), ext)
+            .map_err(|e| format!("couldn't copy {DIR}/{from}: {e}"))
+    };
+    let installed = Installed {
+        rules: copy("judgements", "rhai")?,
+        policies: copy("policies", "rego")?,
+        tirith: copy("risks", "yaml")?,
+    };
+
+    let risks = staged.dir.join("risks");
+    sources::reject_nested(&staged.dir.join("judgements"), "rhai", "judgements")
+        .map_err(|e| e.to_string())?;
+    sources::reject_nested(&risks, "yaml", "risks").map_err(|e| e.to_string())?;
+    let rego = sources::check_rego(&staged.dir.join("policies"))
         .map_err(|e| format!("{DIR}/policies failed opa validation: {e}"))?;
     let (tirith, warnings) = sources::check_tirith_fragments(
         paths,
         risk::compose::REPO_NAMESPACE,
         &risks,
         &format!("{DIR}/risks"),
-        &paths.repo_snapshot_dir(&id).with_extension("validate"),
+        &paths
+            .repo_snapshot_dir(&staged.id)
+            .with_extension("validate"),
     )
     .map_err(|e| format!("{DIR}/risks failed tirith validation: {e}"))?;
 
-    let changes = diff(&paths.repo_snapshot_dir(&id), &live);
-    let snapshot = |from: &str, to: PathBuf, ext: &str| {
-        sources::install_matching_ext(&live.join(from), &to, ext)
-            .map_err(|e| format!("couldn't snapshot {DIR}/{from}: {e}"))
-    };
-    let installed = Installed {
-        rules: snapshot("judgements", paths.repo_judgements_dir(&id), "rhai")?,
-        policies: snapshot("policies", paths.repo_policies_dir(&id), "rego")?,
-        tirith: snapshot("risks", paths.repo_risks_dir(&id), "yaml")?,
-    };
+    let snapshot = paths.repo_snapshot_dir(&staged.id);
+    staged.installed = installed;
+    staged.changes = diff(&snapshot, &staged.dir);
+    staged.review = review_text(&snapshot, &staged.dir);
+    staged.content_check = rego.merge(tirith);
+    staged.warnings = warnings;
+    Ok(Pending::Approve(Box::new(staged)))
+}
 
-    config::upsert_repo(
-        &paths.config_file(),
-        RepoConfig {
-            path: key(&root),
-            id: id.clone(),
-        },
-    )
-    .map_err(|e| format!("couldn't write config.toml: {e}"))?;
-    rebuild(paths, &id);
+/// Second half of `trust`: makes the staged copy the enforced snapshot, or
+/// withdraws the approval. The staged copy is moved into place, never copied
+/// again from the live directory.
+pub fn commit(paths: &Paths, pending: Pending) -> Result<Outcome, String> {
+    match pending {
+        Pending::Withdraw { root, repo } => {
+            withdraw(paths, &repo)?;
+            Ok(Outcome::Withdrawn { root })
+        }
+        Pending::Approve(staged) => {
+            let snapshot = paths.repo_snapshot_dir(&staged.id);
+            let _ = fs::remove_dir_all(&snapshot);
+            fs::rename(&staged.dir, &snapshot)
+                .map_err(|e| format!("couldn't install the approved copy: {e}"))?;
+            config::upsert_repo(
+                &paths.config_file(),
+                RepoConfig {
+                    path: key(&staged.root),
+                    id: staged.id.clone(),
+                },
+            )
+            .map_err(|e| format!("couldn't write config.toml: {e}"))?;
+            rebuild(paths, &staged.id);
+            Ok(Outcome::Approved {
+                root: staged.root.clone(),
+                installed: staged.installed,
+                content_check: staged.content_check,
+                warnings: staged.warnings.clone(),
+            })
+        }
+    }
+}
 
-    Ok(Outcome::Approved {
-        root,
-        installed,
-        changes,
-        content_check: rego.merge(tirith),
-        warnings,
-    })
+/// Makes the repo that `cwd` is in match its `.cerberus/` without asking:
+/// [`stage`] then [`commit`]. The CLI puts a human between the two; this is
+/// for tests.
+#[cfg(test)]
+pub fn trust(paths: &Paths, cwd: &Path) -> Result<Outcome, String> {
+    commit(paths, stage(paths, cwd)?)
+}
+
+/// The text of every file that differs from the last approval, which is what
+/// a human is being asked to read.
+fn review_text(snapshot: &Path, staged: &Path) -> String {
+    let before = tree(snapshot);
+    let mut out = String::new();
+    for (path, bytes) in &tree(staged) {
+        if before.get(path) == Some(bytes) {
+            continue;
+        }
+        let verb = if before.contains_key(path) {
+            "changed"
+        } else {
+            "added"
+        };
+        out.push_str(&format!(
+            "==> {verb} {path}\n{}\n",
+            String::from_utf8_lossy(bytes)
+        ));
+    }
+    out
 }
 
 /// Drops an approval and everything derived from it.
@@ -289,7 +454,8 @@ fn collect(dir: &Path, rel: &str, ext: &str, files: &mut BTreeMap<String, Vec<u8
         };
         if kind.is_dir() {
             collect(&entry.path(), &rel, ext, files);
-        } else if entry.path().extension().and_then(|e| e.to_str()) == Some(ext)
+        } else if kind.is_file()
+            && entry.path().extension().and_then(|e| e.to_str()) == Some(ext)
             && let Ok(bytes) = fs::read(entry.path())
         {
             files.insert(rel, bytes);
@@ -377,6 +543,102 @@ mod tests {
     }
 
     #[test]
+    fn a_nested_git_directory_does_not_shed_the_enclosing_repos_approval() {
+        let (paths, repo) = scratch("nested-git");
+        write(&repo, "judgements/deny.rhai", DENY);
+        trust(&paths, &repo).unwrap();
+
+        let nested = repo.join("sub");
+        fs::create_dir_all(nested.join(".git")).unwrap();
+        assert_eq!(
+            approved(&paths, &nested),
+            approved(&paths, &repo),
+            "a `.git` made inside an approved repo must not escape its rules"
+        );
+        assert!(approved(&paths, &nested).is_some());
+    }
+
+    #[test]
+    fn a_call_is_scoped_by_what_it_touches_as_well_as_where_the_shell_is() {
+        let (paths, repo) = scratch("scope");
+        write(&repo, "judgements/deny.rhai", DENY);
+        trust(&paths, &repo).unwrap();
+        let mine = approved(&paths, &repo).unwrap();
+
+        let away = repo.parent().unwrap().join("away");
+        fs::create_dir_all(&away).unwrap();
+        let none = serde_json::json!({"tool_name": "Bash", "tool_input": {"command": "ls"}});
+        assert_eq!(approved_for(&paths, &away, &none), vec![]);
+
+        // A file tool naming a path in the repo, even one not yet created.
+        let write = |file: &Path| serde_json::json!({"tool_name": "Write", "tool_input": {"file_path": file}});
+        assert_eq!(
+            approved_for(&paths, &away, &write(&repo.join("src/new/file.rs"))),
+            vec![mine.clone()]
+        );
+        // A relative path is the shell's, not the repo's.
+        assert_eq!(
+            approved_for(&paths, &away, &write(Path::new("file.rs"))),
+            vec![]
+        );
+
+        // A command that `cd`s into the repo.
+        let cd = |to: &Path| {
+            let command = format!("cd {} && make", to.display());
+            serde_json::json!({"tool_name": "Bash", "tool_input": {"command": command}})
+        };
+        assert_eq!(approved_for(&paths, &away, &cd(&repo)), vec![mine.clone()]);
+        assert_eq!(approved_for(&paths, &away, &cd(&away)), vec![]);
+
+        // From inside, once, however many ways the call points back at it.
+        assert_eq!(
+            approved_for(&paths, &repo, &write(&repo.join("a.rs"))),
+            vec![mine]
+        );
+    }
+
+    #[test]
+    fn a_symlinked_rule_file_is_not_followed_into_the_snapshot() {
+        let (paths, repo) = scratch("symlink");
+        let outside = repo.join("outside.rhai");
+        fs::write(&outside, DENY).unwrap();
+        let dir = repo.join(DIR).join("judgements");
+        fs::create_dir_all(&dir).unwrap();
+        std::os::unix::fs::symlink(&outside, dir.join("link.rhai")).unwrap();
+        write(&repo, "judgements/real.rhai", DENY);
+
+        let Pending::Approve(staged) = stage(&paths, &repo).unwrap() else {
+            panic!("expected something to approve");
+        };
+        assert_eq!(staged.changes(), ["added judgements/real.rhai"]);
+        assert!(!staged.review().contains("link.rhai"));
+    }
+
+    #[test]
+    fn a_declined_stage_leaves_nothing_behind() {
+        let (paths, repo) = scratch("declined");
+        write(&repo, "judgements/deny.rhai", DENY);
+        let Pending::Approve(staged) = stage(&paths, &repo).unwrap() else {
+            panic!("expected something to approve");
+        };
+        let id = new_id(&repo);
+        assert!(
+            paths
+                .repo_snapshot_dir(&id)
+                .with_extension("staging")
+                .exists()
+        );
+        drop(staged);
+        assert!(
+            !paths
+                .repo_snapshot_dir(&id)
+                .with_extension("staging")
+                .exists()
+        );
+        assert_eq!(approved(&paths, &repo), None);
+    }
+
+    #[test]
     fn a_cerberus_directory_enforces_nothing_until_trusted() {
         let (paths, repo) = scratch("untrusted");
         write(&repo, "judgements/deny.rhai", DENY);
@@ -401,11 +663,13 @@ mod tests {
         )
         .unwrap();
 
-        let Outcome::Approved {
-            installed, changes, ..
-        } = trust(&paths, &repo.join("src"))
-            .or_else(|_| trust(&paths, &repo))
-            .unwrap()
+        let Pending::Approve(staged) = stage(&paths, &repo).unwrap() else {
+            panic!("expected something to approve");
+        };
+        let changes = staged.changes().to_vec();
+        assert!(staged.review().contains("==> added judgements/deny.rhai"));
+        assert!(staged.review().contains("denied by repo"));
+        let Outcome::Approved { installed, .. } = commit(&paths, Pending::Approve(staged)).unwrap()
         else {
             panic!("expected an approval");
         };

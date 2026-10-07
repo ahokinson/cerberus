@@ -73,6 +73,53 @@ impl Sandbox {
         self.command(args).current_dir(dir).output().unwrap()
     }
 
+    /// `cerberus trust` as a human at a terminal: stdin and stdout are the
+    /// slave side of a real pseudo-terminal, and `answer` is typed at the
+    /// prompt. What the terminal showed comes back as `stdout`; `stderr` stays
+    /// a pipe, as it would be for a person redirecting it.
+    fn trust_in(&self, dir: &Path, answer: &str) -> Output {
+        use rustix::pty::{OpenptFlags, grantpt, openpt, ptsname, unlockpt};
+        use std::io::Read;
+        use std::os::unix::ffi::OsStrExt;
+
+        let master = openpt(OpenptFlags::RDWR | OpenptFlags::NOCTTY).unwrap();
+        grantpt(&master).unwrap();
+        unlockpt(&master).unwrap();
+        let name = ptsname(&master, Vec::new()).unwrap();
+        let slave = fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(std::ffi::OsStr::from_bytes(name.as_bytes()))
+            .unwrap();
+        let mut master = fs::File::from(master);
+        let mut screen = master.try_clone().unwrap();
+
+        let child = self
+            .command(&["trust"])
+            .current_dir(dir)
+            .stdin(Stdio::from(slave.try_clone().unwrap()))
+            .stdout(Stdio::from(slave))
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap();
+        // Drained as it arrives so a long review can't fill the pty and block
+        // the child; the read ends when the child exits and the slave closes.
+        let shown = std::thread::spawn(move || {
+            let (mut text, mut chunk) = (Vec::new(), [0u8; 1024]);
+            while let Ok(n @ 1..) = screen.read(&mut chunk) {
+                text.extend_from_slice(&chunk[..n]);
+            }
+            text
+        });
+        master.write_all(format!("{answer}\n").as_bytes()).unwrap();
+        let out = child.wait_with_output().unwrap();
+        Output {
+            status: out.status,
+            stdout: shown.join().unwrap(),
+            stderr: out.stderr,
+        }
+    }
+
     fn run_with_stdin(&self, args: &[&str], stdin: &str) -> Output {
         let mut child = self
             .command(args)
@@ -926,8 +973,23 @@ fn trust_approves_a_repos_cerberus_directory_and_the_guard_enforces_the_snapshot
             .contains(".tirith/policy.yaml")
     );
 
+    // Without a terminal (the agent's shell) trust refuses, and a human who
+    // reads it and declines approves nothing. Either way the content is shown
+    // only to someone who can answer.
+    let no_tty = sb.run_in(&repo, &["trust"]);
+    assert_eq!(no_tty.status.code(), Some(1));
+    assert!(stderr(&no_tty).contains("needs a terminal"));
+    let declined = sb.trust_in(&repo, "n");
+    assert_eq!(declined.status.code(), Some(1));
+    assert!(
+        stdout(&declined).contains("boom"),
+        "the content is shown before asking: {}",
+        stdout(&declined)
+    );
+    assert!(guard_call(&sb, &repo, "boom").trim().is_empty());
+
     // Approved: enforced in that repo, and only there.
-    let approved = sb.run_in(&repo, &["trust"]);
+    let approved = sb.trust_in(&repo, "y");
     assert!(approved.status.success(), "{}", stderr(&approved));
     assert!(
         stdout(&approved).contains("added judgements/deny.rhai"),
@@ -959,7 +1021,7 @@ fn trust_approves_a_repos_cerberus_directory_and_the_guard_enforces_the_snapshot
     // Deleting it loosens nothing either, until trust is run again.
     fs::remove_dir_all(repo.join(".cerberus")).unwrap();
     assert!(guard_call(&sb, &repo, "boom").contains("REPO-001"));
-    let withdrawn = sb.run_in(&repo, &["trust"]);
+    let withdrawn = sb.trust_in(&repo, "y");
     assert!(stdout(&withdrawn).contains("approval withdrawn"));
     assert!(guard_call(&sb, &repo, "boom").trim().is_empty());
 }
@@ -968,7 +1030,7 @@ fn trust_approves_a_repos_cerberus_directory_and_the_guard_enforces_the_snapshot
 fn trust_refuses_outside_a_repo_and_where_there_is_nothing_to_approve() {
     let sb = Sandbox::new("trust-refuses");
     let repo = make_repo(&sb, "app");
-    let empty = sb.run_in(&repo, &["trust"]);
+    let empty = sb.trust_in(&repo, "y");
     assert_eq!(empty.status.code(), Some(1));
     assert!(
         stderr(&empty).contains("no .cerberus/ directory"),
@@ -980,13 +1042,13 @@ fn trust_refuses_outside_a_repo_and_where_there_is_nothing_to_approve() {
     let loose = sb.root.join("loose");
     fs::create_dir_all(&loose).unwrap();
     if loose.ancestors().all(|a| !a.join(".git").exists()) {
-        let out = sb.run_in(&loose, &["trust"]);
+        let out = sb.trust_in(&loose, "y");
         assert_eq!(out.status.code(), Some(1));
         assert!(stderr(&out).contains("not inside a git repository"));
     }
 
     write_repo_file(&repo, ".cerberus/judgements/nested/deep.rhai", REPO_DENY);
-    let nested = sb.run_in(&repo, &["trust"]);
+    let nested = sb.trust_in(&repo, "y");
     assert_eq!(nested.status.code(), Some(1));
     assert!(
         stderr(&nested).contains("must be flat"),
@@ -1031,7 +1093,7 @@ esac"#,
         ".cerberus/risks/zzz.yaml",
         "custom_rules:\n  - id: no-zzz\n    context: [exec]\n    pattern: 'zzz'\n    severity: HIGH\n    action: block\n    title: no zzz\n",
     );
-    let approved = sb.run_in(&team, &["trust"]);
+    let approved = sb.trust_in(&team, "y");
     assert!(approved.status.success(), "{}", stderr(&approved));
     guard_call(&sb, &team, "ls");
     let root = last_root();

@@ -542,9 +542,10 @@ fn install_dir(src: &Path, dest: &Path, ext: &str) -> io::Result<usize> {
         let Some(file_name) = path.file_name().map(|n| n.to_os_string()) else {
             continue;
         };
-        if entry.file_type()?.is_dir() {
+        let kind = entry.file_type()?;
+        if kind.is_dir() {
             installed += install_dir(&path, &dest.join(&file_name), ext)?;
-        } else if path.extension().and_then(|e| e.to_str()) == Some(ext) {
+        } else if kind.is_file() && path.extension().and_then(|e| e.to_str()) == Some(ext) {
             fs::copy(&path, dest.join(&file_name))?;
             installed += 1;
         }

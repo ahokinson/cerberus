@@ -2,7 +2,8 @@
 
 ```sh
 bun install --frozen-lockfile
-bun run check      # Biome, rustfmt, Clippy (-D warnings) and the full test suite
+bun run check      # Biome, rustfmt and Clippy (-D warnings); no tests
+bun run test       # the full test suite
 bun run coverage   # cargo-llvm-cov; fails below 95% of lines or functions
 bun run build      # release layout in dist/ (dist/bin/cerberus)
 bun run format     # Biome and rustfmt, writing

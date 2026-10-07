@@ -3,12 +3,20 @@
   "private": true,
   "scripts": {
     "build": "bun run scripts/build.ts",
-    "check": "bun run check:ts && cargo fmt --check && bun run lint:rust && cargo test --workspace",
-    "check:ts": "biome check scripts",
+    "check": "bun run lint && bun run format:check",
     "coverage": "bun run coverage:rust",
     "coverage:rust": "mkdir -p coverage && cargo llvm-cov --workspace --fail-under-lines 95 --fail-under-functions 95 --lcov --output-path coverage/rust.lcov && cargo llvm-cov report",
-    "format": "biome check --write scripts && cargo fmt",
-    "lint:rust": "cargo clippy --workspace --all-targets -- -D warnings"
+    "format": "bun run format:ts && bun run format:rust",
+    "format:check": "bun run format:check:ts && bun run format:check:rust",
+    "format:check:rust": "cargo fmt --check",
+    "format:check:ts": "biome format scripts",
+    "format:rust": "cargo fmt",
+    "format:ts": "biome check --write scripts",
+    "lint": "bun run lint:ts && bun run lint:rust",
+    "lint:rust": "cargo clippy --workspace --all-targets -- -D warnings",
+    "lint:ts": "biome lint scripts",
+    "test": "bun run test:rust",
+    "test:rust": "cargo test --workspace"
   },
   "devDependencies": {
     "@biomejs/biome": "2.5.15",

@@ -27,7 +27,10 @@
 //   configuration that cerberus itself depends on, so a human should be
 //   making those changes anyway.
 // - SANDBOX-004: running `cerberus trust`, which approves a repo's
-//   `.cerberus/` to be enforced. See `check` below.
+//   `.cerberus/` to be enforced. See `check` below. This is an early,
+//   best-effort deny of the plain command line only (`sh -c "cerberus trust"`
+//   tokenizes to one word and slips past it); the real gate is that `trust`
+//   itself refuses without a terminal.
 //
 // This is also the SessionStart health check's canary for the rule-script
 // layer: synthetic `dangerouslyDisableSandbox: true` (SANDBOX-001) and

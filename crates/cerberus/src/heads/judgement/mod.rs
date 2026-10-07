@@ -46,8 +46,13 @@ pub fn evaluate(paths: &Paths, input: &Value, cwd: &Path) -> Option<String> {
         .or_else(|| {
             // Last, and only from the snapshot a human approved with
             // `cerberus trust`: never the repo's live `.cerberus/`.
-            let repo = repos::approved(paths, cwd)?;
-            engine::evaluate(&paths.repo_judgements_dir(&repo.id), cmd, cwd, input)
+            // Every approved repo the call touches, not only the one the
+            // shell is in; see `repos::approved_for`.
+            repos::approved_for(paths, cwd, input)
+                .iter()
+                .find_map(|repo| {
+                    engine::evaluate(&paths.repo_judgements_dir(&repo.id), cmd, cwd, input)
+                })
         })?;
     Some(pretooluse_deny(&reason))
 }

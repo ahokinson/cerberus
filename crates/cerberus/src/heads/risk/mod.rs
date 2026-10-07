@@ -179,7 +179,11 @@ pub fn evaluate(paths: &Paths, cwd: &Path, input: &Value) -> Option<String> {
     }
     let cmd = bash_command(input)?;
 
-    let repo = repos::approved(paths, cwd).filter(|r| has_risks(paths, &r.id));
+    // tirith reads one policy, so of the approved repos this call touches the
+    // first that ships `risks/` supplies the overlay.
+    let repo = repos::approved_for(paths, cwd, input)
+        .into_iter()
+        .find(|r| has_risks(paths, &r.id));
     let (denied, findings) = check_with_overlay(cmd, paths, repo.as_ref().map(|r| r.id.as_str()));
     if !denied {
         return None;
