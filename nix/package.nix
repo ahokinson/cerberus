@@ -25,7 +25,7 @@ rustPlatform.buildRustPackage {
     ];
   };
 
-  cargoHash = "sha256-TW7WtepZ6DHqCsnyuIRVkfxzXPlbecwcvBDnhNFf0Tk=";
+  cargoHash = "sha256-bdFYdAUPgVj2CODqtzOrb0bwMJhFI3btl4Ao9dF1YTs=";
 
   cargoBuildFlags = [
     "-p"
