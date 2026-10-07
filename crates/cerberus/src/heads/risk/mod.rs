@@ -277,8 +277,12 @@ mod tests {
     /// `overlay_blocks` use in production, deliberately not
     /// `tirith rule test`'s cwd-based auto-discovery (no `.git` boundary
     /// needed here, since `check` never walks for one).
-    fn overlay_root_with_shipped_policy() -> std::path::PathBuf {
-        let dir = tempdir("overlay-root");
+    ///
+    /// `name` must be unique per test: tests run in parallel and each removes
+    /// its root when done, so a shared directory is deleted out from under
+    /// whichever test is still using it.
+    fn overlay_root_with_shipped_policy(name: &str) -> std::path::PathBuf {
+        let dir = tempdir(&format!("overlay-root-{name}"));
         fs::create_dir_all(dir.join(".tirith")).unwrap();
         fs::write(
             dir.join(".tirith/policy.yaml"),
@@ -338,7 +342,7 @@ mod tests {
             return;
         }
         let paths = scratch_paths("self-heal-symlink");
-        let elsewhere = overlay_root_with_shipped_policy();
+        let elsewhere = overlay_root_with_shipped_policy("self-heal");
 
         let overlay_file = paths.tirith_overlay_policy_file();
         let target = elsewhere.join(".tirith/policy.yaml");
@@ -419,7 +423,7 @@ mod tests {
             eprintln!("skipping: tirith not on PATH");
             return;
         }
-        let root = overlay_root_with_shipped_policy();
+        let root = overlay_root_with_shipped_policy("rule-fires");
 
         let (denied, findings, _) = check("rm -rf /home/x/.config/cerberus", Some(&root));
         assert!(denied, "expected cerberus-guard-self-tamper to fire");
