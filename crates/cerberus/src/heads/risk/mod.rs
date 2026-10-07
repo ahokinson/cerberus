@@ -1,11 +1,13 @@
 pub mod compose;
 mod overlay;
 
-pub use overlay::write_tirith_overlay;
+pub(crate) use overlay::has_risks;
+pub use overlay::{write_repo_overlay, write_tirith_overlay};
 
 use crate::config::Paths;
 use crate::domain::{bash_command, pretooluse_deny};
 use crate::process::command_exists;
+use crate::repos;
 use serde::Deserialize;
 use serde_json::Value;
 use std::path::Path;
@@ -35,32 +37,6 @@ struct CheckOutput {
     policy_path_used: Option<String>,
 }
 
-/// True if `cwd` (walking up to a `.git` boundary, mirroring tirith's own
-/// documented repo-policy discovery) already has its own
-/// `.tirith/policy.yaml`. Cerberus's overlay must never silently override a
-/// policy a repo or team already maintains: `TIRITH_POLICY_ROOT` was
-/// confirmed (against the real binary, not just docs) to take full
-/// precedence over an ambient repo policy — scope becomes `org` with "all
-/// fields honored (nothing neutralized)", not merely layered on top — so
-/// without this check cerberus's overlay would silently replace a team's
-/// real posture instead of only supplementing tirith's built-ins in repos
-/// that have none of their own.
-fn has_repo_policy(cwd: &Path) -> bool {
-    let mut dir = cwd;
-    loop {
-        if dir.join(".tirith/policy.yaml").is_file() {
-            return true;
-        }
-        if dir.join(".git").exists() {
-            return false;
-        }
-        match dir.parent() {
-            Some(parent) => dir = parent,
-            None => return false,
-        }
-    }
-}
-
 /// tirith's exit code is the verdict: 1 means deny, anything else (0, a
 /// missing binary spawning nothing, a crash) means allow. A broken scanner
 /// fails open rather than blocking everything. `--format json` is requested
@@ -72,7 +48,11 @@ fn has_repo_policy(cwd: &Path) -> bool {
 /// `policy_root_override`, when set, is applied via `TIRITH_POLICY_ROOT` on
 /// this specific subprocess call only — never the user's own shell or
 /// environment — so cerberus's overlay policy never leaks outside the one
-/// `tirith check` invocation it's meant for.
+/// `tirith check` invocation it's meant for. `TIRITH_POLICY_ROOT` was
+/// confirmed against the real binary to take full precedence over a policy
+/// tirith would otherwise discover on its own (a repo's `.tirith/policy.yaml`,
+/// say): the scope becomes `org` with nothing neutralized. That is the
+/// point. cerberus owns what its risk head enforces.
 fn check(cmd: &str, policy_root_override: Option<&Path>) -> (bool, Vec<Finding>, Option<String>) {
     let mut command = Command::new("tirith");
     command.args(["check", "--non-interactive", "--format", "json", "--", cmd]);
@@ -108,16 +88,33 @@ fn check(cmd: &str, policy_root_override: Option<&Path>) -> (bool, Vec<Finding>,
 /// this repairs to must be the one `init` would write, fragments and
 /// sources included, or a self-heal would silently strip a team's injected
 /// rules for the rest of the session.
-fn check_with_overlay(cmd: &str, paths: &Paths, root: &Path) -> (bool, Vec<Finding>) {
-    let (denied, findings, policy_path_used) = check(cmd, Some(root));
-    let overlay_file = paths.tirith_overlay_policy_file();
+///
+/// `repo` is the id of an approved repo that ships `risks/`, whose overlay
+/// is used in place of the machine's; `None` is the machine overlay.
+fn check_with_overlay(cmd: &str, paths: &Paths, repo: Option<&str>) -> (bool, Vec<Finding>) {
+    let (root, overlay_file) = match repo {
+        Some(id) => {
+            let root = paths.tirith_repo_overlay_root(id);
+            let file = root.join(".tirith/policy.yaml");
+            (root, file)
+        }
+        None => (
+            paths.tirith_overlay_root(),
+            paths.tirith_overlay_policy_file(),
+        ),
+    };
+    let (denied, findings, policy_path_used) = check(cmd, Some(&root));
     if policy_path_used.as_deref() == Some(overlay_file.to_string_lossy().as_ref()) {
         return (denied, findings);
     }
-    if write_tirith_overlay(paths).is_err() {
+    let healed = match repo {
+        Some(id) => write_repo_overlay(paths, id).is_ok(),
+        None => write_tirith_overlay(paths).is_ok(),
+    };
+    if !healed {
         return (denied, findings);
     }
-    let (denied, findings, _) = check(cmd, Some(root));
+    let (denied, findings, _) = check(cmd, Some(&root));
     (denied, findings)
 }
 
@@ -168,24 +165,22 @@ fn build_reason(findings: &[Finding]) -> String {
 /// [`bash_command`] for why the tool is checked by name rather than by
 /// whether a `command` field happens to be present.
 ///
-/// Applies cerberus's own overlay policy (`paths.tirith_overlay_policy_file`,
-/// self-healed by recomposing it if missing or unreadable — see
-/// [`check_with_overlay`]) by pointing `TIRITH_POLICY_ROOT` at it, but only
-/// when `cwd` has no `.tirith/policy.yaml` of its own — see
-/// [`has_repo_policy`]. A repo or team's real tirith policy always wins;
-/// cerberus never overrides it.
+/// Always applies cerberus's own overlay policy
+/// (`paths.tirith_overlay_policy_file`, self-healed by recomposing it if
+/// missing or unreadable — see [`check_with_overlay`]) by pointing
+/// `TIRITH_POLICY_ROOT` at it, whatever policy the repo being guarded
+/// carries. A repo's own `.tirith/policy.yaml` is never read: cerberus owns
+/// what it enforces, and a repo adds to that through its approved
+/// `.cerberus/risks/` instead (see `crate::repos`), whose overlay is used
+/// here when `cwd` is inside such a repo.
 pub fn evaluate(paths: &Paths, cwd: &Path, input: &Value) -> Option<String> {
     if !command_exists("tirith") {
         return None;
     }
     let cmd = bash_command(input)?;
 
-    let (denied, findings) = if has_repo_policy(cwd) {
-        let (denied, findings, _) = check(cmd, None);
-        (denied, findings)
-    } else {
-        check_with_overlay(cmd, paths, &paths.tirith_overlay_root())
-    };
+    let repo = repos::approved(paths, cwd).filter(|r| has_risks(paths, &r.id));
+    let (denied, findings) = check_with_overlay(cmd, paths, repo.as_ref().map(|r| r.id.as_str()));
     if !denied {
         return None;
     }
@@ -253,12 +248,12 @@ fn fires_for(rule_id: &str, command: &str, policy_root: &Path) -> bool {
 }
 
 /// `health`'s canary for this head's shipped overlay content: forces
-/// cerberus's overlay regardless of `cwd` (unlike [`evaluate`], which
-/// defers to a repo's own policy), so a pass here is attributable
+/// the machine overlay regardless of `cwd` (unlike [`evaluate`], which uses
+/// an approved repo's own when there is one), so a pass here is attributable
 /// specifically to cerberus's own `policies/tirith/policy.yaml` being
 /// present, valid, and live — not just that tirith itself is installed.
 pub(crate) fn overlay_blocks(paths: &Paths, cmd: &str) -> bool {
-    check_with_overlay(cmd, paths, &paths.tirith_overlay_root()).0
+    check_with_overlay(cmd, paths, None).0
 }
 
 #[cfg(test)]
@@ -359,11 +354,7 @@ mod tests {
             std::os::unix::fs::symlink(&target, &overlay_file).unwrap();
         }
 
-        let (denied, findings) = check_with_overlay(
-            "cargo uninstall cerberus",
-            &paths,
-            &paths.tirith_overlay_root(),
-        );
+        let (denied, findings) = check_with_overlay("cargo uninstall cerberus", &paths, None);
         assert!(
             denied,
             "self-heal should have rewritten the overlay and retried"
@@ -399,11 +390,7 @@ mod tests {
         let paths = scratch_paths("self-heal-missing");
         assert!(!paths.tirith_overlay_policy_file().exists());
 
-        let (denied, _) = check_with_overlay(
-            "cargo uninstall cerberus",
-            &paths,
-            &paths.tirith_overlay_root(),
-        );
+        let (denied, _) = check_with_overlay("cargo uninstall cerberus", &paths, None);
         assert!(
             denied,
             "self-heal should have written the overlay from scratch"
@@ -506,44 +493,6 @@ mod tests {
             "cerberus's own rule declares no examples, so it is unverifiable rather than \
              broken and must not be reported: {never_fire:?}"
         );
-        fs::remove_dir_all(&dir).ok();
-    }
-
-    #[test]
-    fn has_repo_policy_true_when_cwd_itself_has_one() {
-        let dir = tempdir("cwd-has-policy");
-        fs::create_dir_all(dir.join(".tirith")).unwrap();
-        fs::write(dir.join(".tirith/policy.yaml"), "schema_version: 1\n").unwrap();
-        assert!(has_repo_policy(&dir));
-        fs::remove_dir_all(&dir).ok();
-    }
-
-    #[test]
-    fn has_repo_policy_true_when_found_walking_up_to_repo_root() {
-        let dir = tempdir("nested-has-policy");
-        fs::create_dir_all(dir.join(".tirith")).unwrap();
-        fs::write(dir.join(".tirith/policy.yaml"), "schema_version: 1\n").unwrap();
-        fs::create_dir_all(dir.join(".git")).unwrap();
-        let nested = dir.join("src/deeply/nested");
-        fs::create_dir_all(&nested).unwrap();
-        assert!(has_repo_policy(&nested));
-        fs::remove_dir_all(&dir).ok();
-    }
-
-    #[test]
-    fn has_repo_policy_false_when_repo_root_has_no_policy() {
-        let dir = tempdir("repo-no-policy");
-        fs::create_dir_all(dir.join(".git")).unwrap();
-        let nested = dir.join("src");
-        fs::create_dir_all(&nested).unwrap();
-        assert!(!has_repo_policy(&nested));
-        fs::remove_dir_all(&dir).ok();
-    }
-
-    #[test]
-    fn has_repo_policy_false_when_no_git_boundary_or_policy_found() {
-        let dir = tempdir("no-git-no-policy");
-        assert!(!has_repo_policy(&dir));
         fs::remove_dir_all(&dir).ok();
     }
 

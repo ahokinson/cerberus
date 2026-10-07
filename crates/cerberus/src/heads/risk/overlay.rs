@@ -1,7 +1,9 @@
 use super::compose;
+use crate::config;
 use crate::config::Paths;
 use std::fs;
 use std::io;
+use std::path::Path;
 
 /// Composes cerberus's tirith overlay (base + personal fragments + every
 /// source's, see `heads::risk::compose`) and writes it to
@@ -10,12 +12,41 @@ use std::io;
 /// policies. Pure local file I/O — no `tirith` binary needed to write it,
 /// only to enforce it later.
 ///
-/// Returns the composition result so callers can report how many layers
-/// merged and surface any per-layer problems. Composition itself never
-/// fails; a bad fragment costs only itself.
+/// Every approved repo's own overlay is rewritten alongside it, since each is
+/// the same composition plus that repo's `risks/` and goes stale the moment a
+/// layer beneath it changes.
+///
+/// Returns the machine overlay's composition so callers can report how many
+/// layers merged and surface any per-layer problems. Composition itself
+/// never fails; a bad fragment costs only itself.
 pub fn write_tirith_overlay(paths: &Paths) -> io::Result<compose::Composed> {
     let composed = compose::overlay(paths);
-    let file = paths.tirith_overlay_policy_file();
+    write_policy(&paths.tirith_overlay_policy_file(), &composed.yaml)?;
+    for repo in config::repos(paths) {
+        if has_risks(paths, &repo.id) {
+            let _ = write_repo_overlay(paths, &repo.id);
+        }
+    }
+    Ok(composed)
+}
+
+/// Whether a repo's approved snapshot carries any `risks/` fragments, i.e.
+/// whether it needs an overlay of its own.
+pub(crate) fn has_risks(paths: &Paths, id: &str) -> bool {
+    crate::sources::contains_ext_recursive(&paths.repo_risks_dir(id), "yaml")
+}
+
+/// [`write_tirith_overlay`] for one approved repo.
+pub fn write_repo_overlay(paths: &Paths, id: &str) -> io::Result<compose::Composed> {
+    let composed = compose::repo_overlay(paths, id);
+    let file = paths
+        .tirith_repo_overlay_root(id)
+        .join(".tirith/policy.yaml");
+    write_policy(&file, &composed.yaml)?;
+    Ok(composed)
+}
+
+fn write_policy(file: &Path, yaml: &str) -> io::Result<()> {
     if let Some(parent) = file.parent() {
         fs::create_dir_all(parent)?;
     }
@@ -25,10 +56,9 @@ pub fn write_tirith_overlay(paths: &Paths) -> io::Result<compose::Composed> {
     // leaving the symlink itself in place. symlink_metadata sees the
     // symlink entry itself, unlike metadata, which would follow it too.
     if file.symlink_metadata().is_ok() {
-        fs::remove_file(&file)?;
+        fs::remove_file(file)?;
     }
-    fs::write(&file, &composed.yaml)?;
-    Ok(composed)
+    fs::write(file, yaml)
 }
 
 #[cfg(test)]

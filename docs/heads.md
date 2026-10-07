@@ -93,10 +93,11 @@ never sees live git/process/settings state, so anything needing that stays
 
 `risk` scans Bash command strings via tirith, which ships its own
 extensive built-in detections that already apply with zero configuration.
-cerberus adds an overlay on top of those, applied via `TIRITH_POLICY_ROOT` —
-but **only** in repos that have no `.tirith/policy.yaml` of their own; a
-repo or team's own tirith policy always wins over cerberus's overlay (and so
-does not receive it).
+cerberus adds an overlay on top of those, applied via `TIRITH_POLICY_ROOT` in
+**every** repo. A repo's own `.tirith/policy.yaml` is never read: cerberus
+owns what the risk head enforces, the same way it owns the cupcake store, so
+a repo can't swap cerberus's rules out for its own. What a repo may add goes
+in its approved [`.cerberus/risks/`](repos.md), composed in as one more layer.
 
 That overlay is **composed**, not copied. tirith reads exactly one policy
 file and its schema has no `extends`/`import`, so natively a machine can

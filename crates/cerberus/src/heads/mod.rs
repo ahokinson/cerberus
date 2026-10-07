@@ -26,7 +26,7 @@ impl HeadEvaluator for Policy<'_> {
     }
 
     fn evaluate(&self, call: &ToolCall) -> Option<String> {
-        policy::evaluate(self.0, call.raw)
+        policy::evaluate(self.0, call.cwd, call.raw)
     }
 }
 

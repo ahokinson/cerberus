@@ -96,6 +96,23 @@ pub fn overlay(paths: &Paths) -> Composed {
     compose(embedded::TIRITH_POLICY, &collect_layers(paths))
 }
 
+/// The namespace a trusted repo's rule ids are prefixed with, so a deny names
+/// the repo as its origin.
+pub const REPO_NAMESPACE: &str = "repo";
+
+/// [`overlay`] for a trusted repo: everything on the machine, then the repo's
+/// approved `risks/` last. Last, so that a repo can add to the posture but
+/// the sanitizing in [`compose`] still keeps it from loosening anything.
+pub fn repo_overlay(paths: &Paths, id: &str) -> Composed {
+    let mut layers = collect_layers(paths);
+    layers.extend(read_fragments_from(
+        &paths.repo_risks_dir(id),
+        Some(REPO_NAMESPACE.to_string()),
+        "repo .cerberus/risks",
+    ));
+    compose(embedded::TIRITH_POLICY, &layers)
+}
+
 /// Gathers every fragment on disk, in the deterministic order [`compose`]
 /// merges them. Split out from [`overlay`] so `sources` can build a
 /// *candidate* layer set (one that includes content it hasn't installed yet)

@@ -61,7 +61,7 @@ impl ContentCheck {
     /// dominates `Passed`, so a source whose Rego was validated but whose
     /// tirith fragments weren't still warns; `NotApplicable` never hides a
     /// real result.
-    fn merge(self, other: Self) -> Self {
+    pub(crate) fn merge(self, other: Self) -> Self {
         match (self, other) {
             (Self::Skipped, _) | (_, Self::Skipped) => Self::Skipped,
             (Self::Passed, _) | (_, Self::Passed) => Self::Passed,
@@ -74,7 +74,7 @@ impl ContentCheck {
 /// is available. Returns `Err` only when `opa` actually rejected the
 /// content: that's the one outcome that must abort an `add`/`sync` before
 /// anything is installed.
-fn check_rego(dir: &Path) -> Result<ContentCheck, String> {
+pub(crate) fn check_rego(dir: &Path) -> Result<ContentCheck, String> {
     if !contains_ext_recursive(dir, "rego") {
         return Ok(ContentCheck::NotApplicable);
     }
@@ -112,25 +112,45 @@ fn check_tirith(
     name: &str,
     cache: &Path,
 ) -> Result<(ContentCheck, Vec<String>), String> {
-    let fragments = cache.join("tirith");
-    if !contains_ext_recursive(&fragments, "yaml") {
+    check_tirith_fragments(
+        paths,
+        name,
+        &cache.join("tirith"),
+        &format!("source '{name}'"),
+        &paths.source_cache_dir(name).with_extension("validate"),
+    )
+}
+
+/// The body of [`check_tirith`], for any directory of fragments: `namespace`
+/// prefixes their rule ids and replaces whatever is already installed under
+/// that name, `label` names them in a problem message, and `scratch` is a
+/// throwaway directory for the candidate policy. A repo's `.cerberus/risks`
+/// is checked through the same door a source's `tirith/` is.
+pub(crate) fn check_tirith_fragments(
+    paths: &Paths,
+    namespace: &str,
+    fragments: &Path,
+    label: &str,
+    scratch: &Path,
+) -> Result<(ContentCheck, Vec<String>), String> {
+    if !contains_ext_recursive(fragments, "yaml") {
         return Ok((ContentCheck::NotApplicable, Vec::new()));
     }
     if !command_exists("tirith") {
         return Ok((ContentCheck::Skipped, Vec::new()));
     }
 
-    // Everything already configured, minus this source (a `sync` is
+    // Everything already configured, minus this namespace (a `sync` is
     // replacing its installed fragments, not stacking on them), plus what
     // was just fetched.
     let mut layers: Vec<compose::Layer> = compose::collect_layers(paths)
         .into_iter()
-        .filter(|l| l.namespace.as_deref() != Some(name))
+        .filter(|l| l.namespace.as_deref() != Some(namespace))
         .collect();
     layers.extend(compose::read_fragments_from(
-        &fragments,
-        Some(name.to_string()),
-        &format!("source '{name}'"),
+        fragments,
+        Some(namespace.to_string()),
+        label,
     ));
 
     let composed = compose::compose(crate::embedded::TIRITH_POLICY, &layers);
@@ -138,9 +158,8 @@ fn check_tirith(
         return Err(problem.clone());
     }
 
-    let scratch = paths.source_cache_dir(name).with_extension("validate");
-    let _ = fs::remove_dir_all(&scratch);
-    fs::create_dir_all(&scratch).map_err(|e| format!("couldn't create a scratch dir: {e}"))?;
+    let _ = fs::remove_dir_all(scratch);
+    fs::create_dir_all(scratch).map_err(|e| format!("couldn't create a scratch dir: {e}"))?;
     let candidate = scratch.join("policy.yaml");
     fs::write(&candidate, &composed.yaml)
         .map_err(|e| format!("couldn't write a candidate policy: {e}"))?;
@@ -156,15 +175,15 @@ fn check_tirith(
         Err(e) => Err(format!("failed to run tirith rule validate: {e}")),
     };
     if verdict.is_err() {
-        let _ = fs::remove_dir_all(&scratch);
+        let _ = fs::remove_dir_all(scratch);
         return verdict.map(|c| (c, Vec::new()));
     }
 
     // Validation only proves the rules are well-formed. Whether they can
     // ever actually fire is a separate — and much easier to get wrong —
     // question; see `risk::rules_that_never_fire`.
-    let never_fire = risk::rules_that_never_fire(&composed.yaml, &scratch);
-    let _ = fs::remove_dir_all(&scratch);
+    let never_fire = risk::rules_that_never_fire(&composed.yaml, scratch);
+    let _ = fs::remove_dir_all(scratch);
 
     let warnings = never_fire
         .into_iter()
@@ -188,7 +207,7 @@ fn check_tirith(
 /// skipping the `opa check` gate entirely. Uses `DirEntry::file_type` rather
 /// than following `path.is_dir()`, so a symlinked directory in a hostile
 /// source can't loop the walk.
-fn contains_ext_recursive(dir: &Path, ext: &str) -> bool {
+pub(crate) fn contains_ext_recursive(dir: &Path, ext: &str) -> bool {
     let Ok(entries) = fs::read_dir(dir) else {
         return false;
     };
@@ -472,7 +491,7 @@ fn install_from_cache(paths: &Paths, name: &str) -> io::Result<Installed> {
 /// at `add`/`sync` time instead, loudly. (`policies/` has no such
 /// constraint: cupcake's own scanner is recursive, so nested policies
 /// install *and* enforce.)
-fn reject_nested(src: &Path, ext: &str, label: &str) -> io::Result<()> {
+pub(crate) fn reject_nested(src: &Path, ext: &str, label: &str) -> io::Result<()> {
     let Ok(entries) = fs::read_dir(src) else {
         return Ok(());
     };
@@ -499,7 +518,7 @@ fn reject_nested(src: &Path, ext: &str, label: &str) -> io::Result<()> {
 /// subdirectory) is exclusively sync-managed — unlike the top-level rules
 /// dir, where personal files also live. A source that ships only rules or
 /// only policies is fine: a missing `src` is a no-op, not an error.
-fn install_matching_ext(src: &Path, dest: &Path, ext: &str) -> io::Result<usize> {
+pub(crate) fn install_matching_ext(src: &Path, dest: &Path, ext: &str) -> io::Result<usize> {
     if dest.exists() {
         fs::remove_dir_all(dest)?;
     }

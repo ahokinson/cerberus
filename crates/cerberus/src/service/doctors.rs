@@ -2,6 +2,7 @@ use crate::config;
 use crate::config::Paths;
 use crate::domain::{Check, Status};
 use crate::harnesses;
+use crate::repos;
 use crate::service::healths;
 use serde_json::json;
 use std::fs;
@@ -87,6 +88,64 @@ fn extra_checks(paths: &Paths) -> Vec<Check> {
     });
 
     checks.extend(harnesses::all().iter().map(|harness| harness.check(paths)));
+    if let Ok(cwd) = std::env::current_dir() {
+        checks.extend(repo_checks(paths, &cwd));
+    }
+    checks
+}
+
+/// What the repo the shell is in has that cerberus is, or isn't, enforcing.
+/// Warnings only: an unapproved or drifted `.cerberus/` never weakens the
+/// guard, since the heads enforce the approved snapshot or nothing, but it
+/// is exactly the thing someone assumes is on.
+fn repo_checks(paths: &Paths, cwd: &Path) -> Vec<Check> {
+    let mut checks = Vec::new();
+
+    let ignored = repos::ignored_native(cwd);
+    if !ignored.is_empty() {
+        checks.push(
+            Check::warn(
+                None,
+                "repo.native",
+                "this repo has its own tirith/cupcake config, which cerberus does not read",
+            )
+            .detail(format!("found {}", ignored.join(", ")))
+            .fix(format!(
+                "move what should apply into {}/ (risks/*.yaml, policies/**/*.rego) and run `cerberus trust`",
+                repos::DIR
+            )),
+        );
+    }
+
+    match repos::status(paths, cwd) {
+        repos::Status::Nothing => {}
+        repos::Status::Current { root } => checks.push(Check::ok(
+            None,
+            "repo.cerberus",
+            format!("{}/{} is approved and current", root.display(), repos::DIR),
+        )),
+        repos::Status::Unapproved { root } => checks.push(
+            Check::warn(
+                None,
+                "repo.cerberus",
+                format!("{}/{} is not approved, so it enforces nothing", root.display(), repos::DIR),
+            )
+            .fix("read it, then run `cerberus trust` in the repo"),
+        ),
+        repos::Status::Drifted { root, changes } => checks.push(
+            Check::warn(
+                None,
+                "repo.cerberus",
+                format!(
+                    "{}/{} has changed since it was approved; the approved copy still enforces",
+                    root.display(),
+                    repos::DIR
+                ),
+            )
+            .detail(changes.join(", "))
+            .fix("review the changes, then run `cerberus trust` to approve them (or to withdraw, if the directory is gone)"),
+        ),
+    }
     checks
 }
 

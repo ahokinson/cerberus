@@ -1,6 +1,7 @@
 mod args;
 mod audits;
 mod sources;
+mod trust;
 
 use crate::config::Paths;
 use crate::service::{doctors, gates, guards, healths, inits};
@@ -86,6 +87,19 @@ enum Command {
         #[command(subcommand)]
         action: SourceCommand,
     },
+    /// Approve this repo's .cerberus/ directory
+    ///
+    /// A repo can carry its own judgements/*.rhai, policies/**/*.rego and
+    /// risks/*.yaml in a .cerberus/ directory at its root. None of it
+    /// enforces anything until a human runs this inside the repo: it
+    /// validates the directory, shows what changed since the last approval,
+    /// and snapshots it. cerberus enforces that snapshot, not the live
+    /// directory, so later edits (by anyone, an agent included) change
+    /// nothing until `trust` is run again. If the directory has been
+    /// deleted, running it withdraws the approval.
+    ///
+    /// A repo's own .tirith/ and .cupcake/ are never read.
+    Trust,
     /// Inspect the decision record (off by default; see config.toml)
     ///
     /// Once `[audit] enabled = true`, every deny/ask decision is recorded,
@@ -118,6 +132,7 @@ pub fn run() {
             }
         },
         Command::Source { action } => std::process::exit(sources::run(&paths, action)),
+        Command::Trust => std::process::exit(trust::run(&paths)),
         Command::Audit { action } => std::process::exit(audits::run(&paths, action)),
     }
 }

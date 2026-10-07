@@ -10,6 +10,7 @@ mod harnesses;
 mod heads;
 mod ports;
 mod process;
+mod repos;
 mod service;
 mod sources;
 mod state;

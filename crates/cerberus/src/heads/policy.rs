@@ -1,7 +1,9 @@
 use crate::config::Paths;
 use crate::domain::permission_decision;
 use crate::process::command_exists;
-use std::io::{Read, Write};
+use crate::repos;
+use std::fs;
+use std::io::{self, Read, Write};
 use std::path::Path;
 use std::process::{Command, Stdio};
 
@@ -28,11 +30,15 @@ use std::process::{Command, Stdio};
 ///   absolute *directory* that already exists. It's honored here by `eval`,
 ///   but silently ignored by `cupcake verify`/`inspect` — so neither of
 ///   those can be used to check what cerberus's store actually contains.
-fn spawn_eval(paths: &Paths, input_json: &str) -> Option<String> {
+///
+/// `policy_dir` is the project phase's `.cupcake`: cerberus's own stub
+/// project, or an approved repo's (see [`write_repo_project`]), which adds
+/// that repo's policies without touching the global store.
+fn spawn_eval(paths: &Paths, policy_dir: &Path, input_json: &str) -> Option<String> {
     let mut child = Command::new("cupcake")
         .args(["eval", "--harness", "claude"])
         .arg("--policy-dir")
-        .arg(paths.cupcake_policy_dir())
+        .arg(policy_dir)
         .arg("--global-config")
         .arg(paths.cupcake_global_root())
         .stdin(Stdio::piped())
@@ -83,19 +89,68 @@ fn wants_to_respond(output: &str) -> bool {
 /// respond (deny or ask); `None` (missing binary, project not installed,
 /// eval failure, or an explicit/absent allow) means `guard` moves on to the
 /// next head.
-pub fn evaluate(paths: &Paths, raw_input: &str) -> Option<String> {
+pub fn evaluate(paths: &Paths, cwd: &Path, raw_input: &str) -> Option<String> {
     if !command_exists("cupcake") {
         return None;
     }
     if !project_installed(&paths.cupcake_project_root()) {
         return None;
     }
-    let out = spawn_eval(paths, raw_input)?;
+    // A repo's own `.cupcake/` is never read. An approved repo's
+    // `.cerberus/policies` is, through a project of cerberus's making; if
+    // that project is missing the machine's own is used, so a broken repo
+    // layer can only ever mean less added, never nothing enforced.
+    let policy_dir = repos::approved(paths, cwd)
+        .map(|r| paths.cupcake_repo_policy_dir(&r.id))
+        .filter(|dir| dir.join("policies/claude").is_dir())
+        .unwrap_or_else(|| paths.cupcake_policy_dir());
+    let out = spawn_eval(paths, &policy_dir, raw_input)?;
     if wants_to_respond(&out) {
         Some(out)
     } else {
         None
     }
+}
+
+/// Builds the cupcake project for an approved repo: cerberus's own stub
+/// project (so it carries the scaffold the installed cupcake wants) with the
+/// repo's approved `.rego` added under `policies/claude/repo/`, the same
+/// `claude` addressing the global store uses. Replaced wholesale each time,
+/// and it holds nothing of cerberus's own policies, which stay in the global
+/// store, so there is nothing in it for `init` or a source sync to make stale.
+///
+/// Fails if the stub project isn't installed yet; `init` creates it.
+pub fn write_repo_project(paths: &Paths, id: &str) -> io::Result<()> {
+    let stub = paths.cupcake_policy_dir();
+    if !stub.is_dir() {
+        return Err(io::Error::other(
+            "cerberus's cupcake project isn't installed",
+        ));
+    }
+    let dest = paths.cupcake_repo_policy_dir(id);
+    let _ = fs::remove_dir_all(paths.cupcake_repo_project_root(id));
+    copy_tree(&stub, &dest)?;
+    // The stub's own example policy is scaffolding, not part of a repo's layer.
+    let policies = dest.join("policies/claude");
+    fs::create_dir_all(&policies)?;
+    copy_tree(&paths.repo_policies_dir(id), &policies.join("repo"))
+}
+
+/// Copies `src` into `dest` recursively. Symlinks are skipped rather than
+/// followed, so content from a repo can't pull in a file from elsewhere.
+fn copy_tree(src: &Path, dest: &Path) -> io::Result<()> {
+    fs::create_dir_all(dest)?;
+    for entry in fs::read_dir(src)? {
+        let entry = entry?;
+        let kind = entry.file_type()?;
+        let target = dest.join(entry.file_name());
+        if kind.is_dir() {
+            copy_tree(&entry.path(), &target)?;
+        } else if kind.is_file() {
+            fs::copy(entry.path(), target)?;
+        }
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -210,13 +265,13 @@ mod tests {
             .to_string()
         };
         let denial = |tool: &str, tool_input: serde_json::Value| -> String {
-            let out = evaluate(&paths, &event(tool, tool_input))
+            let out = evaluate(&paths, Path::new("/repo"), &event(tool, tool_input))
                 .unwrap_or_else(|| panic!("expected {tool} to be denied, got an allow"));
             assert!(is_deny(&out), "{out}");
             out
         };
         let allows = |tool: &str, tool_input: serde_json::Value| {
-            let out = evaluate(&paths, &event(tool, tool_input));
+            let out = evaluate(&paths, Path::new("/repo"), &event(tool, tool_input));
             assert!(out.is_none(), "expected an allow, got {out:?}");
         };
 
@@ -260,6 +315,61 @@ mod tests {
         denial(
             "Write",
             json!({"file_path": paths.cupcake_policies_dir().join("sandbox-integrity.rego")}),
+        );
+
+        // A repo's approved `.cerberus/policies` rides in cupcake's project
+        // phase: it denies what the global store doesn't, while the global
+        // store keeps denying inside that repo, and a repo that wasn't
+        // approved is unaffected.
+        let repo = root.join("work/app");
+        fs::create_dir_all(repo.join(".git")).unwrap();
+        let repo = repo.canonicalize().unwrap();
+        let team = repo.join(".cerberus/policies/team");
+        fs::create_dir_all(&team).unwrap();
+        fs::write(
+            team.join("no-prod.rego"),
+            r#"# METADATA
+# scope: package
+# custom:
+#   routing:
+#     required_events: ["PreToolUse"]
+#     required_tools: ["Bash"]
+package cupcake.policies.repo.team.no_prod
+
+import rego.v1
+
+deny contains decision if {
+	input.tool_name == "Bash"
+	contains(input.tool_input.command, "deploy-to-prod")
+	decision := {
+		"rule_id": "REPO-001",
+		"reason": "Blocked by this repo: no prod deploys from an agent.",
+		"severity": "HIGH",
+	}
+}
+"#,
+        )
+        .unwrap();
+        let bash = event("Bash", json!({"command": "deploy-to-prod now"}));
+        assert!(
+            evaluate(&paths, &repo, &bash).is_none(),
+            "an unapproved .cerberus/ must enforce nothing"
+        );
+
+        let outcome = crate::repos::trust(&paths, &repo).unwrap();
+        assert!(matches!(outcome, crate::repos::Outcome::Approved { .. }));
+        let out = evaluate(&paths, &repo, &bash).expect("the repo's policy should deny");
+        assert!(is_deny(&out) && out.contains("no prod deploys"), "{out}");
+        let global_inside_repo = event(
+            "Bash",
+            json!({"command": "ls", "dangerouslyDisableSandbox": true}),
+        );
+        let out = evaluate(&paths, &repo, &global_inside_repo)
+            .expect("cerberus's own policies must still deny inside an approved repo");
+        assert!(out.contains("dangerouslyDisableSandbox"), "{out}");
+        assert!(
+            evaluate(&paths, Path::new("/repo"), &bash).is_none(),
+            "another repo must not inherit it"
         );
 
         fs::remove_dir_all(&root).ok();

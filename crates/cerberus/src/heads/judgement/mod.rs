@@ -7,6 +7,7 @@ pub mod tool;
 use crate::config;
 use crate::config::Paths;
 use crate::domain::{bash_command, pretooluse_deny};
+use crate::repos;
 use serde_json::Value;
 use std::path::Path;
 
@@ -24,6 +25,8 @@ use std::path::Path;
 /// any source that denies, denies, same as the top-level rules. A machine
 /// with no sources configured pays no extra cost —
 /// `engine::evaluate` on a missing/empty directory already returns `None`.
+/// A repo whose `.cerberus/judgements` was approved with `cerberus trust`
+/// is the last layer, read from its approved snapshot (`crate::repos`).
 ///
 /// This is the only head that runs on every tool `guard` is wired for, so
 /// `cmd` is `""` rather than absent for a non-Bash call: a script reaches
@@ -34,11 +37,18 @@ use std::path::Path;
 pub fn evaluate(paths: &Paths, input: &Value, cwd: &Path) -> Option<String> {
     let cmd = bash_command(input).unwrap_or("");
 
-    let reason = engine::evaluate(&paths.rule_scripts_dir(), cmd, cwd, input).or_else(|| {
-        config::sources(paths)
-            .iter()
-            .find_map(|s| engine::evaluate(&paths.source_rules_dir(&s.name), cmd, cwd, input))
-    })?;
+    let reason = engine::evaluate(&paths.rule_scripts_dir(), cmd, cwd, input)
+        .or_else(|| {
+            config::sources(paths)
+                .iter()
+                .find_map(|s| engine::evaluate(&paths.source_rules_dir(&s.name), cmd, cwd, input))
+        })
+        .or_else(|| {
+            // Last, and only from the snapshot a human approved with
+            // `cerberus trust`: never the repo's live `.cerberus/`.
+            let repo = repos::approved(paths, cwd)?;
+            engine::evaluate(&paths.repo_judgements_dir(&repo.id), cmd, cwd, input)
+        })?;
     Some(pretooluse_deny(&reason))
 }
 

@@ -1,3 +1,4 @@
+use crate::config;
 use crate::config::Paths;
 use crate::domain::Head;
 use crate::embedded;
@@ -5,6 +6,7 @@ use crate::harnesses;
 use crate::heads::policy;
 use crate::heads::risk;
 use crate::process::command_exists;
+use crate::repos;
 use std::fs;
 use std::io;
 use std::path::Path;
@@ -382,6 +384,14 @@ pub fn run(paths: &Paths) -> i32 {
             false
         }
     };
+
+    // Approved repos' derived overlays and cupcake projects follow the base
+    // they were built on, so they are rebuilt from their snapshots here too.
+    let approved_repos = config::repos(paths).len();
+    if approved_repos > 0 {
+        repos::rebuild_all(paths);
+        println!("repos: rebuilt {approved_repos} approved repo layer(s) from their snapshots");
+    }
 
     for harness in harnesses::all() {
         if harness.detected(paths) {

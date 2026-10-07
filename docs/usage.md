@@ -8,6 +8,7 @@
 | `cerberus gate` | standalone | the fail-closed backstop on its own, for debugging |
 | `cerberus init` | standalone | bootstraps config, rules, and hook wiring |
 | `cerberus source add/remove/list/sync` | standalone | manages layered policy sources — see [Layered policy sources](sources.md) |
+| `cerberus trust` | standalone | approves (or, if the directory is gone, withdraws) the repo you're in's `.cerberus/` — see [Repo-local rules](repos.md) |
 | `cerberus violations <session>` | standalone | prints a session's deny counts per head |
 | `cerberus audit tail/summary/decisions/allows/rules/export` | standalone | inspects the decision record — see [Audit log](audit.md) |
 

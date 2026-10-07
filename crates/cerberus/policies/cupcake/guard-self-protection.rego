@@ -27,7 +27,10 @@
 # `policies/claude/cerberus/*.rego` and every source's policies nested
 # beneath it alike, so source content is protected from tampering for free.
 # Likewise `cerberus/tirith/` covers both the composed overlay and the
-# fragments it's composed from. Each alternative is kept path-segment
+# fragments it's composed from, and `cerberus/repos/` the snapshots of repos
+# a human approved with `cerberus trust` (what is enforced for them, as
+# opposed to the repo's own live `.cerberus/`, which the agent may edit
+# without changing anything enforced until a human approves it again). Each alternative is kept path-segment
 # specific rather than collapsed into a bare `cerberus/`, which would match
 # any checkout that merely happens to live in a directory of that name.
 
@@ -44,7 +47,7 @@ package cupcake.global.policies.cerberus.guard_self_protection
 import rego.v1
 
 guarded_path(path) if {
-	regex.match(`cerberus/rules/|cerberus/config\.toml|cerberus/tirith/|cerberus/cupcake/`, path)
+	regex.match(`cerberus/rules/|cerberus/config\.toml|cerberus/tirith/|cerberus/cupcake/|cerberus/repos/`, path)
 }
 
 halt contains decision if {
