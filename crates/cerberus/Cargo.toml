@@ -24,3 +24,9 @@ turso = { version = "0.8.0-pre.8", default-features = false, features = ["mimall
 
 [lints.rust]
 unexpected_cfgs = { level = "warn", check-cfg = ["cfg(fuzzing)", "cfg(coverage)"] }
+
+[dev-dependencies]
+# A pseudo-terminal for the tests that drive `cerberus trust`, which refuses
+# without one. Already in the tree through another crate; this only turns on
+# its `pty` feature.
+rustix = { version = "1.1.4", features = ["fs", "pty"] }

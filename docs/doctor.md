@@ -69,6 +69,8 @@ once the hooks are already wired. These are always `warn`, never `FAIL`:
 | `config` | `config.toml` doesn't parse. Defaults apply meanwhile, so every head stays enabled. |
 | `hooks.claude`, `hooks.codex`, `hooks.cursor` | the guard or health hook is missing from that harness's hooks file |
 | `plugin.hermes`, `plugin.opencode` | the plugin is missing, for a harness that's installed |
+| `repo.cerberus` | the repo you ran it in has a `.cerberus/` that isn't approved, or has changed since it was (the approved copy still enforces). Reported `ok` when approved and current. See [repo-local rules](repos.md). |
+| `repo.native` | the repo has its own `.tirith/policy.yaml` or `.cupcake/`, which cerberus deliberately doesn't read |
 
 ## JSON
 

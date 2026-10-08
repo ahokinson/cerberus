@@ -43,8 +43,8 @@ pub const CUPCAKE_POLICIES: &[(&str, &str)] = &[
 
 /// The canonical `risk` head overlay: a small `custom_rules:` addition to
 /// tirith's own built-in detections, written by `cerberus init` to
-/// `Paths::tirith_overlay_policy_file()` and applied only in repos with no
-/// `.tirith/policy.yaml` of their own (see `heads::risk`).
+/// `Paths::tirith_overlay_policy_file()` and applied in every repo, whatever
+/// `.tirith/policy.yaml` it carries (see `heads::risk`).
 pub const TIRITH_POLICY: &str = include_str!("../policies/tirith/policy.yaml");
 
 /// cerberus's Hermes Agent plugin: a Python `pre_tool_call` hook that

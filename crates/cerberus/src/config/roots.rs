@@ -124,9 +124,9 @@ impl Paths {
     }
 
     /// A cerberus-owned tirith policy root: not a real repo, just a fixed
-    /// location `tirith check` can be pointed at via `TIRITH_POLICY_ROOT`
-    /// when the real repo being guarded has no `.tirith/policy.yaml` of its
-    /// own. Formerly `$XDG_DATA_HOME/cerberus-tirith-overlay`.
+    /// location `tirith check` is always pointed at via `TIRITH_POLICY_ROOT`,
+    /// so a policy the repo being guarded carries never takes its place.
+    /// Formerly `$XDG_DATA_HOME/cerberus-tirith-overlay`.
     pub fn tirith_overlay_root(&self) -> PathBuf {
         self.data_home.join("cerberus/tirith")
     }
@@ -147,6 +147,63 @@ impl Paths {
     /// and never writes into it or removes anything from it.
     pub fn tirith_fragments_dir(&self) -> PathBuf {
         self.config_home.join("cerberus/tirith")
+    }
+
+    /// Where a trusted repo's approved `.cerberus/` is kept: a copy `cerberus
+    /// trust` took, which is what the heads enforce, never the live
+    /// directory. Holds `judgements/`, `policies/` and `risks/`, the same
+    /// three the repo's own `.cerberus/` carries.
+    ///
+    /// Keyed by an id `trust` records in `config.toml` rather than by the
+    /// repo's path, so no path from a repo is ever joined into a directory
+    /// cerberus writes to.
+    pub fn repo_snapshot_dir(&self, id: &str) -> PathBuf {
+        self.data_home.join("cerberus/repos").join(id)
+    }
+
+    /// A trusted repo's `judgements/`: rule scripts stacked on the machine's
+    /// own after the sources'. See `judgement::evaluate`.
+    pub fn repo_judgements_dir(&self, id: &str) -> PathBuf {
+        self.repo_snapshot_dir(id).join("judgements")
+    }
+
+    /// A trusted repo's `policies/`, merged into [`Self::cupcake_repo_global_root`].
+    pub fn repo_policies_dir(&self, id: &str) -> PathBuf {
+        self.repo_snapshot_dir(id).join("policies")
+    }
+
+    /// A trusted repo's `risks/`: tirith fragments composed into
+    /// [`Self::tirith_repo_overlay_root`].
+    pub fn repo_risks_dir(&self, id: &str) -> PathBuf {
+        self.repo_snapshot_dir(id).join("risks")
+    }
+
+    /// The tirith policy root for a trusted repo that ships `risks/`: the
+    /// same composition as [`Self::tirith_overlay_root`] with the repo's
+    /// fragments merged in last. cupcake and tirith both read exactly one
+    /// store, so a repo's content can't be stacked at guard time; it gets a
+    /// store of its own, rebuilt by `trust` and `init`.
+    pub fn tirith_repo_overlay_root(&self, id: &str) -> PathBuf {
+        self.tirith_overlay_root().join("repos").join(id)
+    }
+
+    /// The cupcake *project* for a trusted repo that ships `policies/`: a
+    /// copy of cerberus's own stub project plus the repo's `.rego`, handed to
+    /// `cupcake eval` as `--policy-dir` in place of [`Self::cupcake_policy_dir`].
+    ///
+    /// cupcake layers natively (a global phase, then a project phase), unlike
+    /// tirith, so a repo's policies ride in the project phase and cerberus's
+    /// own global store is never copied or rebuilt on a repo's account. A
+    /// policy can't be scoped to one repo inside a shared store, which is why
+    /// the project, not the store, is what varies per repo.
+    pub fn cupcake_repo_project_root(&self, id: &str) -> PathBuf {
+        self.cupcake_project_root().join("repos").join(id)
+    }
+
+    /// What `cupcake eval --policy-dir` wants for [`Self::cupcake_repo_project_root`]:
+    /// its `.cupcake` directory. See [`Self::cupcake_policy_dir`].
+    pub fn cupcake_repo_policy_dir(&self, id: &str) -> PathBuf {
+        self.cupcake_repo_project_root(id).join(".cupcake")
     }
 
     /// Where a named source's tirith fragments are installed — a sibling of

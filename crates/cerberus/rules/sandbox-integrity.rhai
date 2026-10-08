@@ -26,6 +26,11 @@
 //   settings.json at all; that file holds the sandbox, permission, and hook
 //   configuration that cerberus itself depends on, so a human should be
 //   making those changes anyway.
+// - SANDBOX-004: running `cerberus trust`, which approves a repo's
+//   `.cerberus/` to be enforced. See `check` below. This is an early,
+//   best-effort deny of the plain command line only (`sh -c "cerberus trust"`
+//   tokenizes to one word and slips past it); the real gate is that `trust`
+//   itself refuses without a terminal.
 //
 // This is also the SessionStart health check's canary for the rule-script
 // layer: synthetic `dangerouslyDisableSandbox: true` (SANDBOX-001) and
@@ -47,7 +52,25 @@ fn is_writing_tool(name) {
     name == "Write" || name == "Edit" || name == "NotebookEdit"
 }
 
+// True for `cerberus trust`, by whatever path the binary is invoked.
+fn runs_cerberus_trust(cmd) {
+    let words = tokenize(cmd);
+    for i in 1..words.len() {
+        if words[i] == "trust" && (words[i - 1] == "cerberus" || words[i - 1].ends_with("/cerberus")) {
+            return true;
+        }
+    }
+    false
+}
+
 fn check(cmd, cwd, input) {
+    // SANDBOX-004: `cerberus trust` is what turns a repo's `.cerberus/` into
+    // enforced content. Approving it is the review step, so it is a human's
+    // command; an agent running it would be approving its own rules.
+    if runs_cerberus_trust(cmd) {
+        return "Blocked (SANDBOX-004): the agent may not run `cerberus trust`. It approves a repo's `.cerberus/` to be enforced, and that review is a human's call. Ask for the approval instead.";
+    }
+
     if input.tool_input.dangerouslyDisableSandbox == true {
         return "Blocked (SANDBOX-001): the agent may not disable its own Bash sandbox (`dangerouslyDisableSandbox`). If a command genuinely needs to run unsandboxed, that decision belongs to a human, not the agent.";
     }

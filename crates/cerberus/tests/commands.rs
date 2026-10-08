@@ -68,6 +68,58 @@ impl Sandbox {
         self.command(args).output().unwrap()
     }
 
+    /// `run`, from inside `dir`: what a human at a shell in a repo does.
+    fn run_in(&self, dir: &Path, args: &[&str]) -> Output {
+        self.command(args).current_dir(dir).output().unwrap()
+    }
+
+    /// `cerberus trust` as a human at a terminal: stdin and stdout are the
+    /// slave side of a real pseudo-terminal, and `answer` is typed at the
+    /// prompt. What the terminal showed comes back as `stdout`; `stderr` stays
+    /// a pipe, as it would be for a person redirecting it.
+    fn trust_in(&self, dir: &Path, answer: &str) -> Output {
+        use rustix::pty::{OpenptFlags, grantpt, openpt, ptsname, unlockpt};
+        use std::io::Read;
+        use std::os::unix::ffi::OsStrExt;
+
+        let master = openpt(OpenptFlags::RDWR | OpenptFlags::NOCTTY).unwrap();
+        grantpt(&master).unwrap();
+        unlockpt(&master).unwrap();
+        let name = ptsname(&master, Vec::new()).unwrap();
+        let slave = fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(std::ffi::OsStr::from_bytes(name.as_bytes()))
+            .unwrap();
+        let mut master = fs::File::from(master);
+        let mut screen = master.try_clone().unwrap();
+
+        let child = self
+            .command(&["trust"])
+            .current_dir(dir)
+            .stdin(Stdio::from(slave.try_clone().unwrap()))
+            .stdout(Stdio::from(slave))
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap();
+        // Drained as it arrives so a long review can't fill the pty and block
+        // the child; the read ends when the child exits and the slave closes.
+        let shown = std::thread::spawn(move || {
+            let (mut text, mut chunk) = (Vec::new(), [0u8; 1024]);
+            while let Ok(n @ 1..) = screen.read(&mut chunk) {
+                text.extend_from_slice(&chunk[..n]);
+            }
+            text
+        });
+        master.write_all(format!("{answer}\n").as_bytes()).unwrap();
+        let out = child.wait_with_output().unwrap();
+        Output {
+            status: out.status,
+            stdout: shown.join().unwrap(),
+            stderr: out.stderr,
+        }
+    }
+
     fn run_with_stdin(&self, args: &[&str], stdin: &str) -> Output {
         let mut child = self
             .command(args)
@@ -743,7 +795,9 @@ fn guard_runs_risk_and_policy_through_the_tools_it_finds() {
     // An overlay that tirith reports not using is recomposed, then the verdict stands.
     assert!(guard_call(&sb, cwd, "drift").trim().is_empty());
 
-    // A repo with its own tirith policy is judged by that, not cerberus's overlay.
+    // A repo's own tirith policy changes nothing: cerberus's overlay still
+    // applies there. (`repo_policy_never_displaces_the_overlay` pins which
+    // policy root tirith is actually handed.)
     let repo = sb.root.join("repo");
     fs::create_dir_all(repo.join(".tirith")).unwrap();
     fs::write(repo.join(".tirith/policy.yaml"), "paranoia: 1\n").unwrap();
@@ -855,4 +909,203 @@ fn source_content_is_validated_by_opa_and_tirith_before_it_installs() {
     );
     let refused = sb.run(&["source", "add", &loosen, "--name", "loosen"]);
     assert_eq!(refused.status.code(), Some(1), "{}", stderr(&refused));
+}
+
+// ---- Repo-local `.cerberus/` ------------------------------------------------
+
+fn make_repo(sb: &Sandbox, name: &str) -> PathBuf {
+    let repo = sb.root.join(name);
+    fs::create_dir_all(repo.join(".git")).unwrap();
+    repo.canonicalize().unwrap()
+}
+
+fn write_repo_file(repo: &Path, rel: &str, body: &str) {
+    let file = repo.join(rel);
+    fs::create_dir_all(file.parent().unwrap()).unwrap();
+    fs::write(file, body).unwrap();
+}
+
+/// `doctor --json` from inside `repo`. The sandbox has no tirith or cupcake,
+/// so doctor leaves the degraded sentinel behind, which would make the gate
+/// deny every later call; it is cleared so the test can keep guarding.
+fn doctor_in(sb: &Sandbox, repo: &Path) -> Value {
+    let report = json(&sb.run_in(repo, &["doctor", "--json"]));
+    let _ = fs::remove_file(sb.sentinel());
+    report
+}
+
+fn check_named(report: &Value, id: &str) -> Value {
+    report["checks"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|c| c["id"] == id)
+        .unwrap_or_else(|| panic!("no {id} check in {report}"))
+        .clone()
+}
+
+const REPO_DENY: &str =
+    r#"fn check(cmd, cwd, input) { if cmd.contains("boom") { "Blocked (REPO-001): boom" } }"#;
+
+#[test]
+fn trust_approves_a_repos_cerberus_directory_and_the_guard_enforces_the_snapshot() {
+    let sb = Sandbox::new("trust-judgement");
+    let repo = make_repo(&sb, "app");
+    let elsewhere = make_repo(&sb, "other");
+    write_repo_file(&repo, ".cerberus/judgements/deny.rhai", REPO_DENY);
+    // What a repo carries of its own is never read, and doctor says so.
+    write_repo_file(&repo, ".tirith/policy.yaml", "paranoia: 1\n");
+
+    // Unapproved: present, ignored, and flagged.
+    assert!(guard_call(&sb, &repo, "boom").trim().is_empty());
+    let report = doctor_in(&sb, &repo);
+    assert_eq!(check_named(&report, "repo.cerberus")["status"], "warn");
+    assert!(
+        check_named(&report, "repo.cerberus")["fix"]
+            .as_str()
+            .unwrap()
+            .contains("cerberus trust")
+    );
+    assert!(
+        check_named(&report, "repo.native")["detail"]
+            .as_str()
+            .unwrap()
+            .contains(".tirith/policy.yaml")
+    );
+
+    // Without a terminal (the agent's shell) trust refuses, and a human who
+    // reads it and declines approves nothing. Either way the content is shown
+    // only to someone who can answer.
+    let no_tty = sb.run_in(&repo, &["trust"]);
+    assert_eq!(no_tty.status.code(), Some(1));
+    assert!(stderr(&no_tty).contains("needs a terminal"));
+    let declined = sb.trust_in(&repo, "n");
+    assert_eq!(declined.status.code(), Some(1));
+    assert!(
+        stdout(&declined).contains("boom"),
+        "the content is shown before asking: {}",
+        stdout(&declined)
+    );
+    assert!(guard_call(&sb, &repo, "boom").trim().is_empty());
+
+    // Approved: enforced in that repo, and only there.
+    let approved = sb.trust_in(&repo, "y");
+    assert!(approved.status.success(), "{}", stderr(&approved));
+    assert!(
+        stdout(&approved).contains("added judgements/deny.rhai"),
+        "{}",
+        stdout(&approved)
+    );
+    assert!(guard_call(&sb, &repo, "boom").contains("REPO-001"));
+    assert!(guard_call(&sb, &elsewhere, "boom").trim().is_empty());
+    assert!(guard_call(&sb, &repo, "ls").trim().is_empty());
+    let report = doctor_in(&sb, &repo);
+    assert_eq!(check_named(&report, "repo.cerberus")["status"], "ok");
+
+    // Editing the live directory loosens nothing, and doctor reports it.
+    write_repo_file(
+        &repo,
+        ".cerberus/judgements/deny.rhai",
+        "fn check(c, d, i) {}",
+    );
+    assert!(guard_call(&sb, &repo, "boom").contains("REPO-001"));
+    let drifted = check_named(&doctor_in(&sb, &repo), "repo.cerberus");
+    assert_eq!(drifted["status"], "warn");
+    assert!(
+        drifted["detail"]
+            .as_str()
+            .unwrap()
+            .contains("changed judgements/deny.rhai")
+    );
+
+    // Deleting it loosens nothing either, until trust is run again.
+    fs::remove_dir_all(repo.join(".cerberus")).unwrap();
+    assert!(guard_call(&sb, &repo, "boom").contains("REPO-001"));
+    let withdrawn = sb.trust_in(&repo, "y");
+    assert!(stdout(&withdrawn).contains("approval withdrawn"));
+    assert!(guard_call(&sb, &repo, "boom").trim().is_empty());
+}
+
+#[test]
+fn trust_refuses_outside_a_repo_and_where_there_is_nothing_to_approve() {
+    let sb = Sandbox::new("trust-refuses");
+    let repo = make_repo(&sb, "app");
+    let empty = sb.trust_in(&repo, "y");
+    assert_eq!(empty.status.code(), Some(1));
+    assert!(
+        stderr(&empty).contains("no .cerberus/ directory"),
+        "{}",
+        stderr(&empty)
+    );
+
+    // The scratch tree sits under the system temp dir, outside any repository.
+    let loose = sb.root.join("loose");
+    fs::create_dir_all(&loose).unwrap();
+    if loose.ancestors().all(|a| !a.join(".git").exists()) {
+        let out = sb.trust_in(&loose, "y");
+        assert_eq!(out.status.code(), Some(1));
+        assert!(stderr(&out).contains("not inside a git repository"));
+    }
+
+    write_repo_file(&repo, ".cerberus/judgements/nested/deep.rhai", REPO_DENY);
+    let nested = sb.trust_in(&repo, "y");
+    assert_eq!(nested.status.code(), Some(1));
+    assert!(
+        stderr(&nested).contains("must be flat"),
+        "{}",
+        stderr(&nested)
+    );
+    assert!(!sb.root.join("config/cerberus/config.toml").exists());
+}
+
+#[test]
+fn repo_policy_never_displaces_the_overlay() {
+    let sb = Sandbox::new("repo-policy-overlay");
+    let log = sb.root.join("roots.log");
+    // Records the policy root every `tirith check` is handed, and reports
+    // that file as the one in use so no self-heal muddies the log.
+    sb.tool(
+        "tirith",
+        &format!(
+            r#"case "$1" in
+rule) exit 0 ;;
+check)
+  echo "${{TIRITH_POLICY_ROOT:-unset}}" >> "{log}"
+  printf '%s\n' '{{"findings":[],"policy_path_used":"'"$TIRITH_POLICY_ROOT/.tirith/policy.yaml"'"}}' ;;
+esac"#,
+            log = log.display()
+        ),
+    );
+    let last_root = || read(&log).lines().last().unwrap().to_string();
+    let data = sb.root.join("data/cerberus/tirith");
+
+    // A repo with its own tirith policy: still handed cerberus's overlay.
+    let native = make_repo(&sb, "native");
+    write_repo_file(&native, ".tirith/policy.yaml", "paranoia: 1\n");
+    guard_call(&sb, &native, "ls");
+    assert_eq!(last_root(), data.display().to_string());
+
+    // An approved repo with `risks/`: its own overlay, with its rules in it.
+    let team = make_repo(&sb, "team");
+    write_repo_file(&team, ".tirith/policy.yaml", "paranoia: 1\n");
+    write_repo_file(
+        &team,
+        ".cerberus/risks/zzz.yaml",
+        "custom_rules:\n  - id: no-zzz\n    context: [exec]\n    pattern: 'zzz'\n    severity: HIGH\n    action: block\n    title: no zzz\n",
+    );
+    let approved = sb.trust_in(&team, "y");
+    assert!(approved.status.success(), "{}", stderr(&approved));
+    guard_call(&sb, &team, "ls");
+    let root = last_root();
+    assert!(
+        root.starts_with(&format!("{}/repos/", data.display())),
+        "expected a per-repo overlay, got {root}"
+    );
+    let overlay = read(&Path::new(&root).join(".tirith/policy.yaml"));
+    assert!(overlay.contains("repo-no-zzz"), "{overlay}");
+    assert!(overlay.contains("cerberus-guard-self-tamper"), "{overlay}");
+
+    // And everyone else is unaffected by it.
+    guard_call(&sb, &native, "ls");
+    assert_eq!(last_root(), data.display().to_string());
 }

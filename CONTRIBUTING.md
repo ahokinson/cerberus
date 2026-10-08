@@ -15,7 +15,8 @@ nobody has checked.
 
 ```sh
 bun install --frozen-lockfile
-bun run check      # Biome, rustfmt, Clippy (-D warnings), cargo test
+bun run check      # Biome, rustfmt and Clippy (-D warnings); no tests
+bun run test       # cargo test
 bun run coverage   # 95% of lines and functions
 ```
 
@@ -148,7 +149,9 @@ the tool form — so covering one proves nothing about the other.
 ## Adding a policy rule
 
 `policy` evaluates cupcake's **global** store, which cupcake itself layers
-on top of each project's own `.cupcake/` policies. The canonical `.rego`
+under a project phase. cerberus supplies that project too (its own stub, or
+an approved repo's [`.cerberus/policies`](docs/repos.md)) and never reads a
+repo's own `.cupcake/`. The canonical `.rego`
 files cerberus ships live in this repo's
 [`policies/cupcake/`](crates/cerberus/policies/cupcake/) directory and are installed by
 `cerberus init` into `policies/claude/cerberus/` inside **cerberus's own**
@@ -202,9 +205,10 @@ policy and risk content" below.
 
 `risk` scans Bash command strings via tirith, which ships extensive
 built-in detections that apply with zero configuration. cerberus adds an
-overlay on top, applied via `TIRITH_POLICY_ROOT` only in repos with no
-`.tirith/policy.yaml` of their own (`heads::risk::has_repo_policy`
-— a repo or team's own policy always wins).
+overlay on top, applied via `TIRITH_POLICY_ROOT` in **every** repo: a repo's
+own `.tirith/policy.yaml` is never read, so cerberus's rules cannot be
+displaced by one. A repo adds to the overlay through its approved
+[`.cerberus/risks/`](docs/repos.md) instead.
 
 This section is about the **base layer**,
 `policies/tirith/policy.yaml`, embedded as `crates/cerberus/src/embedded.rs`'s

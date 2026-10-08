@@ -13,12 +13,12 @@
 # reported and ignored, and paranoia merges as a maximum. A source repo can
 # tighten the risk head, never loosen it.
 #
-# cerberus's overlay is applied only in repos that don't already have their
-# own .tirith/policy.yaml (see src/integrations/tirith/mod.rs::has_repo_policy
-# — a repo's own policy always wins; cerberus never overrides it. Confirmed:
-# TIRITH_POLICY_ROOT otherwise takes precedence over an ambient repo policy,
-# so this Rust-side guard is load-bearing, not decorative). Note that means
-# injected rules don't reach such a repo either.
+# cerberus's overlay is applied in every repo. A repo's own
+# .tirith/policy.yaml is never read: TIRITH_POLICY_ROOT takes full precedence
+# over a policy tirith would discover itself (confirmed against the real
+# binary), and cerberus always sets it, so what the risk head enforces is
+# cerberus's to decide. A repo adds rules through its approved
+# .cerberus/risks/ (see src/repos), composed in as one more layer.
 #
 # schema_version / fail_mode / paranoia are pinned explicitly rather than
 # left to tirith's own defaults, so a future tirith version changing its

@@ -42,6 +42,7 @@ next session. `cerberus doctor` diagnoses it and retests.
 - [Configuration](docs/configuration.md): `config.toml`
 - [Heads and rules](docs/heads.md): the shipped rules, policies and tirith overlay
 - [Layered policy sources](docs/sources.md): team rule repos
+- [Repo-local rules](docs/repos.md): a repo's own `.cerberus/`, approved with `cerberus trust`
 - [Audit log](docs/audit.md): the optional local decision log
 - [Diagnosing a degraded guard](docs/doctor.md): `cerberus doctor`
 - [Design notes](docs/design.md): fail-open heads, fail-closed system

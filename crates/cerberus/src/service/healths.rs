@@ -26,7 +26,7 @@ fn canary_blocked(paths: &Paths) -> bool {
         "tool_input": { "command": "rm -rf /" },
     })
     .to_string();
-    policy::evaluate(paths, &event).is_some_and(|out| is_deny(&out))
+    policy::evaluate(paths, std::path::Path::new("/"), &event).is_some_and(|out| is_deny(&out))
 }
 
 /// Canary for the policy head's **global-store** content specifically, as
@@ -51,7 +51,7 @@ fn global_policy_canary_blocked(paths: &Paths) -> bool {
         },
     })
     .to_string();
-    policy::evaluate(paths, &event).is_some_and(|out| is_deny(&out))
+    policy::evaluate(paths, std::path::Path::new("/"), &event).is_some_and(|out| is_deny(&out))
 }
 
 /// Canary for the risk head's shipped overlay content

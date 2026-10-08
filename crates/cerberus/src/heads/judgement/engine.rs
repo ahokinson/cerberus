@@ -34,6 +34,10 @@ fn dynamic_to_json(value: &Dynamic) -> Value {
 /// scripts only have to express situational judgement.
 pub fn build_engine() -> Engine {
     let mut engine = Engine::new();
+    // A script that never finishes would hang every guarded tool call. Past
+    // this it errors, which fails open for that script alone (see
+    // `evaluate`), so a looping repo or source script costs only itself.
+    engine.set_max_operations(5_000_000);
 
     engine.register_fn("tokenize", |cmd: &str| -> Array {
         array_from_strings(shell::tokenize(cmd))
@@ -745,6 +749,24 @@ mod tests {
         write_rule(&dir, "broken.rhai", "fn check(cmd, cwd, input) { 1/0 }");
         let input = serde_json::json!({});
         assert_eq!(evaluate(&dir, "ls -la", Path::new("/tmp"), &input), None);
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn a_script_that_never_finishes_is_cut_off_and_fails_open() {
+        let dir = tempdir("looping");
+        write_rule(&dir, "loop.rhai", "fn check(cmd, cwd, input) { loop { } }");
+        write_rule(
+            &dir,
+            "zdeny.rhai",
+            "fn check(cmd, cwd, input) { \"denied after the loop\" }",
+        );
+        let input = serde_json::json!({});
+        assert_eq!(
+            evaluate(&dir, "ls", Path::new("/tmp"), &input).as_deref(),
+            Some("denied after the loop"),
+            "the loop is cut off and the next script still runs"
+        );
         fs::remove_dir_all(&dir).ok();
     }
 

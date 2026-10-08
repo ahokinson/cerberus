@@ -35,6 +35,16 @@ pub struct SourceConfig {
     pub pinned: Option<String>,
 }
 
+/// A repo whose `.cerberus/` a human approved with `cerberus trust`. `path`
+/// is the repo root the approval applies to; `id` names the snapshot of the
+/// approved content (`Paths::repo_snapshot_dir`), so the heads enforce what
+/// was reviewed, not whatever the directory holds now.
+#[derive(Deserialize, Serialize, Clone, Debug, PartialEq, Eq)]
+pub struct RepoConfig {
+    pub path: String,
+    pub id: String,
+}
+
 #[derive(Deserialize, Serialize, Default)]
 struct AuditSettings {
     #[serde(default)]
@@ -56,6 +66,8 @@ struct RawConfig {
     heads: HeadsTable,
     #[serde(default)]
     sources: Vec<SourceConfig>,
+    #[serde(default)]
+    repos: Vec<RepoConfig>,
     #[serde(default)]
     audit: AuditSettings,
 }
@@ -134,6 +146,22 @@ pub fn sources(paths: &Paths) -> Vec<SourceConfig> {
         .collect()
 }
 
+/// A repo `id` becomes a directory name under cerberus's data home, so it is
+/// held to hex digits before it is ever joined into a path, applied on read
+/// as well as write for the same reason as [`valid_source_name`].
+pub fn valid_repo_id(id: &str) -> bool {
+    !id.is_empty() && id.chars().all(|c| c.is_ascii_hexdigit())
+}
+
+/// Every repo a human has approved, in file order. See [`valid_repo_id`].
+pub fn repos(paths: &Paths) -> Vec<RepoConfig> {
+    read_config(&paths.config_file())
+        .repos
+        .into_iter()
+        .filter(|r| valid_repo_id(&r.id))
+        .collect()
+}
+
 /// Whether the structured audit log (`src/audit.rs`) is enabled. Off by
 /// default and on any config-read problem: unlike the heads, "fail open"
 /// here would mean writing more sensitive data (raw command/tool-input
@@ -164,6 +192,28 @@ pub fn remove_source(config_path: &Path, name: &str) -> io::Result<bool> {
         write_config(config_path, &config)?;
     }
     Ok(removed)
+}
+
+/// Records `repo` as approved, replacing any entry for the same path.
+pub fn upsert_repo(config_path: &Path, repo: RepoConfig) -> io::Result<()> {
+    let mut config = read_config(config_path);
+    match config.repos.iter_mut().find(|r| r.path == repo.path) {
+        Some(existing) => *existing = repo,
+        None => config.repos.push(repo),
+    }
+    write_config(config_path, &config)
+}
+
+/// Withdraws the approval for the repo at `path`, returning the removed
+/// entry.
+pub fn remove_repo(config_path: &Path, path: &str) -> io::Result<Option<RepoConfig>> {
+    let mut config = read_config(config_path);
+    let Some(index) = config.repos.iter().position(|r| r.path == path) else {
+        return Ok(None);
+    };
+    let removed = config.repos.remove(index);
+    write_config(config_path, &config)?;
+    Ok(Some(removed))
 }
 
 #[cfg(test)]
@@ -377,5 +427,37 @@ mod tests {
         assert!(remove_source(&path, "team").unwrap());
         assert_eq!(sources(&paths), vec![]);
         assert!(!remove_source(&path, "team").unwrap(), "already removed");
+    }
+
+    /// An approved repo's `id` becomes a directory name, so a hand-edited
+    /// `config.toml` can't smuggle a path through it.
+    #[test]
+    fn repos_round_trip_and_drop_ids_that_are_not_hex() {
+        let paths = paths_with_config("repos", None);
+        let config = paths.config_file();
+        let repo = RepoConfig {
+            path: "/work/app".into(),
+            id: "0123abcd".into(),
+        };
+        upsert_repo(&config, repo.clone()).unwrap();
+        upsert_repo(
+            &config,
+            RepoConfig {
+                path: "/work/evil".into(),
+                id: "../escape".into(),
+            },
+        )
+        .unwrap();
+        assert_eq!(repos(&paths), vec![repo.clone()]);
+
+        let moved = RepoConfig {
+            id: "ffff".into(),
+            ..repo.clone()
+        };
+        upsert_repo(&config, moved.clone()).unwrap();
+        assert_eq!(repos(&paths), vec![moved.clone()], "same path, replaced");
+
+        assert_eq!(remove_repo(&config, "/work/app").unwrap(), Some(moved));
+        assert_eq!(remove_repo(&config, "/work/app").unwrap(), None);
     }
 }
